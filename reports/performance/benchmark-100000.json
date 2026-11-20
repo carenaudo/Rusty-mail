@@ -1,0 +1,11 @@
+{
+  "accounts": 3,
+  "build": "debug",
+  "downloaded_bodies": 20000,
+  "encrypted": true,
+  "ingest_ms": 21411,
+  "messages": 100000,
+  "page_p95_ms": 10.5517,
+  "read_p95_ms": 0.21359999999999998,
+  "search_p95_ms": 34.7046
+}

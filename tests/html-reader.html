@@ -1,0 +1,106 @@
+<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self' ws:; frame-src 'self'; object-src 'none'; base-uri 'none'; form-action 'none'"><title>HTML reader fixture</title></head><body><div id="app"></div><script type="module">
+import {mount,tick} from 'svelte';
+import {mockIPC} from '@tauri-apps/api/mocks';
+import Harness from './HtmlReaderHarness.svelte';
+import {prepareMail,mailDocument} from '/src/mail-html';
+import {setLanguage} from '/src/locale.svelte';
+import {png,hostile} from './html-fixtures';
+import '/src/style.css';
+const calls=[];let slow=false,failLogo=true;
+mockIPC(async(cmd,args)=>{
+ calls.push({cmd,args});
+ if(cmd==='load_message_images'){
+  if(slow)await new Promise(r=>setTimeout(r,180));
+  return args.sources.map(source=>{
+   if(source==='cid:logo'&&failLogo){failLogo=false;return {source,data_url:null}}
+   return {source,data_url:png};
+  });
+ }
+ if(cmd==='open_message_link')return null;
+ throw Error('Unexpected IPC: '+cmd);
+});
+mount(Harness,{target:document.getElementById('app')});
+const assert=(value,message)=>{if(!value)throw Error(message)};
+async function waitFor(check){for(let i=0;i<150;i++){await new Promise(r=>setTimeout(r,20));await tick();if(check())return}throw Error('Timed out waiting for HTML reader')}
+const button=text=>Array.from(document.querySelectorAll('button')).find(b=>b.textContent===text);
+const dialog=()=>document.querySelector('dialog.security-confirmation[open]');
+async function approve(action){
+ await waitFor(dialog);
+ [...dialog().querySelectorAll('button')].find(b=>b.textContent===action).click();
+ await waitFor(()=>!dialog());
+}
+const source=()=>document.querySelector('iframe')?.getAttribute('srcdoc')||'';
+const parsed=()=>new DOMParser().parseFromString(source(),'text/html');
+try{
+ await waitFor(()=>document.querySelector('iframe'));
+ const prepared=prepareMail(hostile);
+ assert(prepared.images.length===3,'Only visible, supported image sources survive');
+ assert(prepared.skippedImages===1,'Unsupported content is counted separately');
+ assert(prepared.links.length===1,'Unsafe links are removed');
+ assert(document.querySelector('iframe').getAttribute('sandbox')==='','Frame has an opaque origin and no script permissions');
+ assert(!source().includes('__html_probe')&&!source().includes('https://images.example.com'),'No remote resource URLs reach the frame');
+ assert(parsed().querySelector('h1')?.textContent==='Quarterly update','Headings survive');
+ assert(parsed().querySelector('strong')?.textContent==='room to think','Bold formatting survives');
+ assert(parsed().querySelector('table td')?.textContent==='Rusty Mail','Tables survive');
+ assert(!parsed().querySelector('script,iframe,form,svg,math,input,object,base,link'),'Active content is stripped');
+ assert(!parsed().body.querySelector('[onerror],[onload],[srcset],[href],[id],[name]'),'Active attributes and link navigation are stripped');
+ assert(!parsed().querySelector('img'),'All images, including embedded/data images, are blocked before consent');
+ assert(source().includes("img-src data:")&&source().includes("connect-src 'none'"),'Frame CSP blocks network requests');
+ await new Promise(r=>setTimeout(r,150));
+ assert(!calls.some(c=>c.cmd==='load_message_images'),'No image fetch before consent');
+ assert(!window.__htmlAttack,'Email scripts never execute');
+ assert(performance.getEntriesByType('resource').every(r=>!r.name.includes('__html_probe')),'Parsing and sanitizing never preloads remote resources');
+ const frame=document.querySelector('iframe');
+ const height=frame.getBoundingClientRect().height;
+ button('Larger view').click();await tick();
+ assert(button('Larger view').getAttribute('aria-pressed')==='true'&&frame.getBoundingClientRect().height>height,'Larger view resizes the same sandboxed frame');
+ const before=button('Show embedded images');
+ before.focus();before.click();
+ await waitFor(dialog);
+ assert(document.activeElement.textContent==='Cancel','Cancel receives initial focus');
+ assert(dialog().textContent.includes('You are responsible'),'Warning explains responsibility');
+ dialog().querySelector('button').click();
+ await waitFor(()=>!dialog()&&document.activeElement===before);
+ assert(!calls.length,'Cancelling causes no IPC');
+ before.click();await approve('Show embedded images');
+ await waitFor(()=>button('Retry embedded images'));
+ assert(parsed().querySelectorAll('img').length===1,'A successful embedded image survives a partial failure');
+ assert(calls[0].args.sources.every(source=>!source.startsWith('https:')),'Embedded approval never requests remote images');
+ button('Retry embedded images').click();await approve('Show embedded images');
+ await waitFor(()=>parsed().querySelectorAll('img').length===2);
+ assert(calls[1].args.sources.join()==='cid:logo','Retry requests only the missing image');
+ button('Load remote images').click();await approve('Load remote images');
+ await waitFor(()=>parsed().querySelectorAll('img').length===3);
+ assert(calls.filter(c=>c.cmd==='load_message_images').length===3,'Each explicit action starts one image request');
+ assert(calls[2].args.sources.join()==='https://images.example.com/tracker.png','Remote approval requests only remote images');
+ assert(calls.find(c=>c.cmd==='load_message_images').args.id==='one','Image request belongs to selected message');
+ assert(Array.from(parsed().querySelectorAll('img')).every(i=>i.getAttribute('src').startsWith('data:image/png;base64,')),'Only validated data images enter the frame');
+ button('Hide images').click();await waitFor(()=>!parsed().querySelector('img'));
+ slow=true;button('Load remote images').click();await approve('Load remote images');
+ document.querySelector('[data-testid="switch-message"]').click();
+ await new Promise(r=>setTimeout(r,250));await tick();
+ assert(button('Load remote images')&&button('Show embedded images'),'Approval resets on message change');
+ assert(!parsed().querySelector('img'),'Stale image response cannot reveal images in another message');
+ button('View plain text').click();await waitFor(()=>!document.querySelector('iframe'));
+ assert(document.querySelector('.body').textContent.includes('<b>Literal text stays escaped.</b>'),'Plain text fallback stays escaped');
+ button('Show formatting').click();await waitFor(()=>document.querySelector('iframe'));
+ assert(button('Load remote images'),'Switching reading modes does not retain approval');
+ document.querySelector('.mail-links summary').click();
+ document.querySelector('.mail-links button').click();await waitFor(dialog);
+ assert(dialog().textContent.includes('https://example.com/review'),'Confirmation displays the exact link');
+ assert(!calls.some(c=>c.cmd==='open_message_link'),'Link waits for confirmation');
+ await approve('Follow link');
+ assert(calls.some(c=>c.cmd==='open_message_link'&&c.args.url==='https://example.com/review'),'Links open only through an explicit safe-link action');
+ assert(!window.__htmlAttack,'Scripts remain blocked after all actions');
+ assert(performance.getEntriesByType('resource').every(r=>!r.name.includes('__html_probe')),'No remote resource requests occur during rendering');
+ setLanguage('es');
+ await waitFor(()=>button('Cargar imágenes remotas'));
+ button('Cargar imágenes remotas').click();
+ await waitFor(dialog);
+ assert(dialog().textContent.includes('riesgo de seguridad')&&document.activeElement.textContent==='Cancelar','Security warning and cancel action are translated');
+ dialog().querySelector('button').click();
+ await waitFor(()=>!dialog());
+ setLanguage('en');
+ document.title='PASS: HTML reader security';document.documentElement.dataset.testResult='passed';
+}catch(e){document.title='FAIL: '+e.message;document.documentElement.dataset.testResult=String(e);console.error(e)}
+</script></body></html>

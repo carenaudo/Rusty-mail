@@ -1,0 +1,37 @@
+{
+  "build": "debug",
+  "encrypted": true,
+  "engine_sha256": "90a4cd4c4735bf85a816f64d4fead5973e8ddc8ed5daa42ea461e23b31119558",
+  "fixture": "30 messages per provider thread across 3 accounts; 20k cached bodies and HTML",
+  "label": "before-compose",
+  "measured_utc": "2026-11-04T01:02:52.276904900+00:00",
+  "messages": 500000,
+  "timings": {
+    "broad_search_error": "no such column: mail_search in WITH hits AS (SELECT m.id,m.received, row_number() OVER (PARTITION BY CASE WHEN coalesce(json_extract(m.payload,'$.conversation_key'),'')!='' THEN json_array(m.account_id,json_extract(m.payload,'$.conversation_key')) ELSE json_array(m.id) END ORDER BY m.received DESC,m.id DESC) AS rank,\n        count(*) OVER (PARTITION BY CASE WHEN coalesce(json_extract(m.payload,'$.conversation_key'),'')!='' THEN json_array(m.account_id,json_extract(m.payload,'$.conversation_key')) ELSE json_array(m.id) END) AS members,\n        max(json_extract(m.payload,'$.unread')) OVER (PARTITION BY CASE WHEN coalesce(json_extract(m.payload,'$.conversation_key'),'')!='' THEN json_array(m.account_id,json_extract(m.payload,'$.conversation_key')) ELSE json_array(m.id) END) AS any_unread,\n        max(json_extract(m.payload,'$.starred')) OVER (PARTITION BY CASE WHEN coalesce(json_extract(m.payload,'$.conversation_key'),'')!='' THEN json_array(m.account_id,json_extract(m.payload,'$.conversation_key')) ELSE json_array(m.id) END) AS any_starred\n        FROM mail m INDEXED BY mail_folder_order WHERE mail_search MATCH ?1 AND m.folder=?2) SELECT count(*) FROM hits WHERE rank=1 at offset 1078",
+    "cached_message": {
+      "p50_ms": 0.0538,
+      "p95_ms": 0.0666,
+      "samples": 50
+    },
+    "conversation_members": {
+      "p50_ms": 0.6091,
+      "p95_ms": 0.8497,
+      "samples": 50
+    },
+    "conversation_page": {
+      "p50_ms": 28726.8409,
+      "p95_ms": 28748.4539,
+      "samples": 3
+    },
+    "next_page": {
+      "p50_ms": 29863.2162,
+      "p95_ms": 30771.7798,
+      "samples": 3
+    },
+    "scoped_search": {
+      "p50_ms": 288.5734,
+      "p95_ms": 299.6645,
+      "samples": 3
+    }
+  }
+}

@@ -1,0 +1,51 @@
+{
+  "build": "debug",
+  "encrypted": true,
+  "engine_sha256": "7b96c8bf93c999ca55c48708354de632fc3e9d44e1fca8044ef427a9a5038147",
+  "fixture": "30 messages per provider thread across 3 accounts; 20k cached bodies and HTML",
+  "label": "client-opt-baseline",
+  "measured_utc": "2026-11-20T01:01:52.404334200+00:00",
+  "messages": 500000,
+  "timings": {
+    "account_inbox": {
+      "p50_ms": 6.781599999999999,
+      "p95_ms": 7.3407,
+      "samples": 7
+    },
+    "account_inbox_unrelated_snooze": {
+      "p50_ms": 1119.9401,
+      "p95_ms": 1175.1978000000001,
+      "samples": 7
+    },
+    "broad_search": {
+      "p50_ms": 3222.1761,
+      "p95_ms": 3621.586,
+      "samples": 7
+    },
+    "cached_message": {
+      "p50_ms": 0.059500000000000004,
+      "p95_ms": 0.14880000000000002,
+      "samples": 50
+    },
+    "conversation_members": {
+      "p50_ms": 0.6629999999999999,
+      "p95_ms": 0.8235,
+      "samples": 50
+    },
+    "conversation_page": {
+      "p50_ms": 5.457199999999999,
+      "p95_ms": 5.928,
+      "samples": 3
+    },
+    "next_page": {
+      "p50_ms": 7.0405,
+      "p95_ms": 7.4948999999999995,
+      "samples": 3
+    },
+    "scoped_search": {
+      "p50_ms": 46.551,
+      "p95_ms": 51.2206,
+      "samples": 3
+    }
+  }
+}

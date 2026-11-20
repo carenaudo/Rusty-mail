@@ -1,0 +1,61 @@
+{
+    "installer":  "Rusty Mail_0.1.0_x64-setup.exe",
+    "version":  "0.1.0",
+    "createdUtc":  "2026-10-29T17:57:41.7533960Z",
+    "authenticodeStatus":  "NotSigned",
+    "profile":  "release",
+    "installerBytes":  4258407,
+    "mode":  "Development",
+    "noticesSha256":  "2E65023C75D8AF585064F6927220FD451B2FCA9504D4C7456B36A82783CB4431",
+    "sourceHashes":  [
+                         {
+                             "sha256":  "10E9E7D6B25F9236AECEB37798906485FAB062BEC8C63DC855C0333BB990BA91",
+                             "file":  "acceptance.rs"
+                         },
+                         {
+                             "sha256":  "B39FEF3CFD9FF34ECA603EB7AC0216AF643AADA28D7696D855AE3308C0C17EFB",
+                             "file":  "ai.rs"
+                         },
+                         {
+                             "sha256":  "ED85D8652354AFA312479A1F8819267A31A1BF604FC0F412D234CDD80D83E1C7",
+                             "file":  "ai_network_tests.rs"
+                         },
+                         {
+                             "sha256":  "776BDE75612CA48C6C0A74660B0961C2C599015A7408D285B83DA3EDAA67B1D5",
+                             "file":  "auth.rs"
+                         },
+                         {
+                             "sha256":  "5479AB5989135ADAA4EDD2590031901CB94DBCEA3BE3C6128BA63F25E5FEE1CF",
+                             "file":  "engine.rs"
+                         },
+                         {
+                             "sha256":  "18411913583774F1845F489474BC278730AE51AFD4F5E7B91C9C605CCA96E2D0",
+                             "file":  "hardening_tests.rs"
+                         },
+                         {
+                             "sha256":  "1A16FD6802E2435B984A8632DA03F31096245976BB1127186102399F863380DD",
+                             "file":  "live.rs"
+                         },
+                         {
+                             "sha256":  "E33B4D59C65E750E26160624688A8B5A5486D1A2FD02B3D8A088640C11CA0D8A",
+                             "file":  "main.rs"
+                         },
+                         {
+                             "sha256":  "77831C882B9F6FB56922B36D73894DF392604B23102F05AB8F7C5BB796885355",
+                             "file":  "providers.rs"
+                         },
+                         {
+                             "sha256":  "D009E8D5B065C86D8702A7ACAB5724CD0CC4BBFB239D9B758D08C0E9D7C2F3CC",
+                             "file":  "schema-v4.sql"
+                         },
+                         {
+                             "sha256":  "5DCEE8C71A9B6ECF6F116F668DED6E3847E9101AA5CF12463AF75FFE6D3E6E4F",
+                             "file":  "schema-v6.sql"
+                         },
+                         {
+                             "sha256":  "212F0F3FCAF78135D3CD0942937BEA1AF061EDBAE11AC3A65F33664C567312E3",
+                             "file":  "updates.rs"
+                         }
+                     ],
+    "sha256":  "154B59339262BBF9638759ED551D5D2BD7074D77184D18027D701E0A3C0C9707"
+}

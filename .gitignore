@@ -1,0 +1,40 @@
+# Dependencies and build outputs
+/node_modules/
+/dist/
+/target/
+/src-tauri/target/
+/src-tauri/gen/
+*.tsbuildinfo
+
+# Local releases and diagnostic output
+/.release/
+/exports/
+/npm-audit.json
+/reports/soak/
+/reports/performance/environment.json
+*.log
+
+# Local configuration and signing material
+.env
+.env.*
+!.env.example
+*.pfx
+*.p12
+*.key
+*.key.pub
+*.pem
+
+# Mail caches and SQLite sidecars
+*.db
+*.db-*
+*.sqlite
+*.sqlite-*
+*.sqlite3
+*.sqlite3-*
+
+# Windows and editor metadata
+Thumbs.db
+Desktop.ini
+.DS_Store
+/.idea/
+/.vscode/

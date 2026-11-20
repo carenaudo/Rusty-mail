@@ -1,0 +1,14 @@
+{
+  "fixture": "1000 synthetic metadata flag updates, rolled back",
+  "samples": 3,
+  "with_summary_ms": [
+    114.3615,
+    117.3974,
+    118.01929999999999
+  ],
+  "without_summary_ms": [
+    44.9125,
+    48.0059,
+    366.93829999999997
+  ]
+}

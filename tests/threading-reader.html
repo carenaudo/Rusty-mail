@@ -1,0 +1,263 @@
+<!doctype html>
+<html lang="en"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><title>Threading reader fixture</title></head><body><div id="app"></div><script type="module">
+import {mount,tick} from 'svelte';
+import {mockIPC} from '@tauri-apps/api/mocks';
+import LiveApp from '/src/LiveApp.svelte';
+import '/src/style.css';
+const imap=new URLSearchParams(location.search).has('imap');
+const base={account_id:'a',account:'me@example.com',provider:imap?'imap':'google',thread_id:imap?'':'thread',conversation_key:imap?'subject:thread':'native:thread',message_id:'<reply@example.com>',headers_shortened:false,category:'people',starred:false,unread:true,loaded:false,attachments:[],conversation_count:2};
+const older={...base,id:'older',remote_id:'older',sender:'Elena Rivera',address:'elena@example.com',subject:'A little room to think',body:'Here is the original outline.',folder:'inbox',date:'2026-10-29T09:00:00Z'};
+const newer={...base,id:'newer',remote_id:'newer',sender:'Marcus Chen',address:'marcus@example.com',subject:'Re: A little room to think',body:'The outline looks good. Let’s leave a little more space for discussion.',folder:'sent',date:'2026-10-30T12:00:00Z'};
+const other={...base,id:'other',remote_id:'other',thread_id:imap?'':'other-thread',conversation_key:imap?'subject:other-thread':'native:other-thread',sender:'Sofia',address:'sofia@example.com',subject:'Coffee next week?',body:'Would Tuesday work?',folder:'inbox',conversation_count:1,date:'2026-10-28T12:00:00Z'};
+const later={...other,id:'later',remote_id:'later',subject:'Second page'};
+const calls=[]; let failOlder=true; let slowOlder=false; let showOther=true; let notificationPrefs={enabled:false,previews:false};
+let wake=null, releaseSearch;
+const failedJobs=Array.from({length:25},(_,i)=>({
+ id:'failure-'+i,account_id:'a',kind:'mutation',status:'failed',detail:'Provider failed',
+ subject:'Failed message '+i,due:0
+}));
+mockIPC(async(cmd,args)=>{
+ calls.push({cmd,args});
+ if(cmd==='list_mailboxes')return [{id:'project',account_id:'a',name:'Project folder',label:!imap}];
+ if(cmd==='organize_mail')return null;
+ if(cmd==='get_signatures')return {};
+ if(cmd==='recent_recipients')return [];
+ if(cmd==='unread_counts')return {a:2};
+ if(cmd==='next_snooze_wake')return wake*1000>Date.now()?wake:null;
+ if(cmd==='get_account_aliases')return {};
+ if(cmd==='notification_preferences')return notificationPrefs;
+ if(cmd==='set_notification_preferences')return notificationPrefs=args.value;
+ if(cmd==='list_accounts')return [{id:'a',provider:imap?'imap':'google',email:'me@example.com'}];
+ if(cmd==='query_mail'){
+  if(args.search==='held'){
+   await new Promise(resolve=>releaseSearch=resolve);
+   return {messages:[later],total:1,next_cursor:null};
+  }
+  return args.cursor
+   ?{messages:[later],total:3,next_cursor:null}
+   :{messages:showOther?[newer,other]:[newer],total:showOther?3:2,next_cursor:{received:1,id:'other'}};
+ }
+ if(cmd==='get_conversation')return args.id==='other'?[other]:[older,newer];
+ if(cmd==='get_mail'){
+  if(args.id==='older'&&failOlder){failOlder=false;throw 'Synthetic offline error'}
+  if(args.id==='older'&&slowOlder)await new Promise(r=>setTimeout(r,200));
+  return {...[older,newer,other].find(m=>m.id===args.id),loaded:true};
+ }
+ if(cmd==='queue_mutation'){
+  const m=[older,newer,other].find(m=>m.id===args.id);
+  if(args.action==='read'||args.action==='unread')m.unread=args.action==='unread';
+  else m.folder=args.action;
+  return null;
+ }
+ if(cmd==='queue_bulk_mutation')return args.rowIds.length+1;
+ if(cmd==='list_jobs')return failedJobs;
+ if(cmd==='list_active_jobs')return {
+  jobs:failedJobs.slice(args.offset,args.offset+20),
+  next_offset:args.offset+20<failedJobs.length?args.offset+20:null
+ };
+ if(cmd==='retry_mutation')return null;
+ if(cmd==='prepare_compose'){const m=[older,newer,other].find(m=>m.id===args.id);return {draft:{account_id:'a',to:m.address,cc:'',bcc:'',subject:'Re: '+m.subject,body:'Quote',reply_message_id:m.message_id,source_message_id:m.id,mode:args.mode,attachments:[]},available_attachments:[]}}
+ if(cmd==='save_live_draft')return null;
+ throw new Error(`Unexpected IPC: ${cmd}`);
+},{shouldMockEvents:true});
+mount(LiveApp,{target:document.getElementById('app')});
+const assert=(condition,label)=>{if(!condition)throw new Error(label)};
+const byText=(selector,text)=>[...document.querySelectorAll(selector)].find(node=>node.textContent.trim()===text);
+const checkedCount=()=>document.querySelectorAll('.triage-row input:checked').length;
+const selectPage=()=>document.querySelector('.triage-controls input');
+function enter(input,value,event){
+ input.value=value;
+ input.dispatchEvent(new Event(event,{bubbles:true}));
+}
+async function waitFor(check){for(let i=0;i<100;i++){await new Promise(r=>setTimeout(r,20));await tick();if(check())return}throw new Error('Timed out waiting for reader')}
+try {
+ await waitFor(()=>document.querySelectorAll('.message').length===2);
+ document.querySelector('.message').click();
+ await waitFor(()=>document.querySelector('.conversation-message'));
+ assert(document.querySelectorAll('.conversation-expanded').length===1,'One message expanded');
+ if(imap)assert(document.querySelector('.conversation-meta').textContent.includes('Grouped by subject'),'Subject grouping is disclosed');
+ assert(calls.filter(c=>c.cmd==='get_mail').length===1,'Only selected body fetched');
+ assert(document.querySelector('.body').textContent.includes('outline looks good'),'Latest message body visible');
+ document.querySelector('.conversation-message').click();
+ await waitFor(()=>document.querySelector('.body').textContent.includes('Could not load'));
+ assert(!document.querySelector('.body').textContent.includes('outline looks good'),'Previous body hidden after failure');
+ document.querySelector('.body button').click();
+ await waitFor(()=>document.querySelector('.body').textContent.includes('original outline'));
+ assert(calls.some(c=>c.cmd==='queue_mutation'&&c.args.id==='older'),'Read mutation belongs to expanded message');
+ document.querySelector('.reply-actions .reply').click();
+ await waitFor(()=>document.querySelector('.modal'));
+ assert(document.querySelector('.modal input').value==='elena@example.com','Reply targets selected sender');
+ document.querySelector('.modal-header button').click();
+ // Race: a slow body must not replace the next selected conversation.
+ await waitFor(()=>!document.querySelector('.modal'));
+ document.querySelectorAll('.message')[1].click();
+ await waitFor(()=>document.querySelector('.body')?.textContent.includes('Tuesday'));
+ slowOlder=true;
+ document.querySelectorAll('.message')[0].click();
+ await waitFor(()=>document.querySelector('.conversation-message'));
+ document.querySelector('.conversation-message').click();
+ document.querySelectorAll('.message')[1].click();
+ await new Promise(r=>setTimeout(r,300));await tick();
+ assert(document.querySelector('.body').textContent.includes('Tuesday'),'Stale download cannot replace current conversation');
+ document.querySelectorAll('.message')[0].click();
+ await waitFor(()=>document.querySelector('.body').textContent.includes('outline looks good'));
+ // Reader actions always apply to the expanded member, including a Sent reply.
+ document.querySelector('.reader-menu summary').click();
+ assert(byText('.reader-menu button','Move to Inbox'),'Sent reply can move to Inbox');
+ const readsBefore=calls.filter(c=>c.cmd==='queue_mutation'&&c.args.action==='read').length;
+ byText('.reader-menu button','Mark unread').click();
+ await waitFor(()=>calls.some(c=>c.cmd==='queue_mutation'&&c.args.id==='newer'&&c.args.action==='unread'));
+ await waitFor(()=>!document.querySelector('.triage-row input').disabled);
+ assert(calls.filter(c=>c.cmd==='queue_mutation'&&c.args.action==='read').length===readsBefore,'Refresh leaves manually marked message unread');
+ document.querySelector('.message').click();
+ await waitFor(()=>calls.filter(c=>c.cmd==='queue_mutation'&&c.args.action==='read').length===readsBefore+1);
+ await waitFor(()=>byText('.reader-menu button','Mark unread')&&!byText('.reader-menu button','Mark unread').disabled);
+ document.querySelector('.reader-menu summary').click();
+ byText('.reader-menu button','Move to Inbox').click();
+ await waitFor(()=>calls.some(c=>c.cmd==='queue_mutation'&&c.args.id==='newer'&&c.args.action==='inbox'));
+ await waitFor(()=>!document.querySelector('.triage-row input').disabled);
+ document.querySelector('.message').click();
+ await waitFor(()=>document.querySelector('.reader-eyebrow')?.textContent.includes('inbox'));
+ document.querySelector('.reader-menu summary').click();
+ assert(!byText('.reader-menu button','Move to Inbox'),'Inbox message hides redundant move');
+ byText('.reader-menu button','Report spam').click();
+ await waitFor(()=>calls.some(c=>c.cmd==='queue_mutation'&&c.args.id==='newer'&&c.args.action==='spam'));
+
+ await waitFor(()=>!selectPage().disabled);
+ const rowCheck=document.querySelector('.triage-row input');
+ rowCheck.focus();
+ assert(document.activeElement===rowCheck&&rowCheck.tabIndex===0,'Selection checkbox is keyboard focusable');
+ rowCheck.click();
+ await waitFor(()=>selectPage().indeterminate);
+ assert(checkedCount()===1,'Row checkbox selects only its own row');
+ selectPage().click();
+ await waitFor(()=>checkedCount()===2);
+ assert(document.querySelector('.selection-count').textContent.includes('2 selected'),'Select this page counts visible rows');
+ const firstRowPosition=document.querySelector('.triage-row').getBoundingClientRect().top;
+ byText('.triage-controls button','Clear selection').click();
+ await waitFor(()=>checkedCount()===0);
+ assert(document.querySelector('.triage-row').getBoundingClientRect().top===firstRowPosition,'Selection toolbar keeps rows stationary');
+ selectPage().click();await waitFor(()=>checkedCount()===2);
+ byText('.message-list .pagination button','Next').click();
+ await waitFor(()=>document.querySelector('.row-subject').textContent.includes('Second page'));
+ assert(checkedCount()===0,'Changing page clears the selection');
+ byText('.message-list .pagination button','Previous').click();
+ await waitFor(()=>document.querySelectorAll('.message').length===2&&!selectPage().disabled);
+
+ selectPage().click();
+ await waitFor(()=>checkedCount()===2);
+ showOther=false;
+ const {emit}=await import('@tauri-apps/api/event');
+ await emit('mail-changed');
+ await waitFor(()=>document.querySelectorAll('.message').length===1&&!selectPage().disabled);
+ assert(checkedCount()===1,'Refresh drops disappeared rows and keeps surviving selections');
+
+ document.querySelector('.mail-filters summary').click();
+ document.querySelector('.unread-filter input').click();
+ await waitFor(()=>calls.some(c=>c.cmd==='query_mail'&&c.args.filters?.unread));
+ assert(checkedCount()===0,'Changing filters clears the selection');
+ enter(document.querySelector('.filter-fields input[inputmode=email]'),'Marcus@Example.com','input');
+ const [fromInput,throughInput]=document.querySelectorAll('.filter-dates input');
+ enter(fromInput,'2026-10-29','change');
+ enter(throughInput,'2026-10-30','change');
+ const fromBoundary=new Date(2026,9,29).getTime()/1000;
+ const throughBoundary=new Date(2026,9,31).getTime()/1000;
+ await waitFor(()=>calls.some(c=>c.cmd==='query_mail'&&c.args.filters?.received_before===throughBoundary));
+ await waitFor(()=>!selectPage().disabled);
+ selectPage().click();
+ await waitFor(()=>checkedCount()===1);
+ document.querySelector('.bulk-menu summary').click();
+ byText('.bulk-actions button','Mark selected as read').click();
+ await waitFor(()=>document.querySelector('.toast[role=status]')?.textContent.includes('2 messages queued'));
+ const batch=calls.findLast(c=>c.cmd==='queue_bulk_mutation').args;
+ assert(batch.action==='read'&&batch.rowIds.join()==='newer','Bulk action sends the selected row and action');
+ assert(batch.scope.filters.unread&&batch.scope.filters.sender==='Marcus@Example.com'
+  &&batch.scope.filters.received_from===fromBoundary&&batch.scope.filters.received_before===throughBoundary,'Bulk action uses the displayed search filters and local date boundaries');
+ byText('.filter-summary button','Clear filters').click();
+ await waitFor(()=>calls.findLast(c=>c.cmd==='query_mail').args.filters===null);
+ assert(!document.querySelector('.filter-summary'),'Clear filters removes active indicators');
+
+ document.querySelector('.header-actions button[aria-label="Mail operations"]').click();
+ await waitFor(()=>document.querySelectorAll('.operation-row').length===20);
+ assert(document.querySelectorAll('.outbox-strip strong').length===4,'The quick strip remains compact');
+ byText('.modal .pagination button','Next').click();
+ await waitFor(()=>document.querySelectorAll('.operation-row').length===5);
+ byText('.operation-row:last-child button','Retry').click();
+ await waitFor(()=>calls.some(c=>c.cmd==='retry_mutation'&&c.args.id==='failure-24'));
+ document.querySelector('.modal-header button').click();
+ await waitFor(()=>!document.querySelector('.modal'));
+ const mailboxGroup=document.querySelector('.mailbox-groups details');
+ mailboxGroup.open=true;
+ byText('.mailbox-groups button','Project folder').click();
+ await waitFor(()=>calls.some(c=>c.cmd==='query_mail'&&c.args.folder==='mailbox:project'&&c.args.account==='a'));
+ await waitFor(()=>!document.querySelector('.triage-row input').disabled);
+ assert(document.querySelector('.list-heading h1').textContent==='Project folder','Sidebar opens the named account mailbox');
+ document.querySelector('.message').click();
+ await waitFor(()=>document.querySelector('.body')?.textContent.includes('outline looks good'));
+ document.querySelector('.reader-menu summary').click();
+ document.querySelector('.organize-menu summary').click();
+ if(imap){
+  byText('.organize-menu button','Project folder').click();
+  await waitFor(()=>calls.some(c=>c.cmd==='organize_mail'&&c.args.id==='newer'&&c.args.target==='project'&&c.args.enabled===null));
+ }else{
+  const label=document.querySelector('.organize-menu input');
+  label.click();
+  await waitFor(()=>label.checked&&!label.disabled);
+  label.click();
+  await waitFor(()=>!label.checked&&!label.disabled);
+  const operations=calls.filter(c=>c.cmd==='organize_mail');
+  assert(operations.length===2&&operations[0].args.enabled===true&&operations[1].args.enabled===false&&operations.every(c=>c.args.id==='newer'),'Gmail label can be added and removed on the expanded message');
+ }
+ await waitFor(()=>document.querySelector('.account .inbox-unread')?.textContent==='2');
+ byText('.sidebar-bottom button','Settings').click();
+ await waitFor(()=>document.querySelector('.notification-settings'));
+ const [enable,previews]=document.querySelectorAll('.notification-settings input');
+ assert(!enable.checked&&!previews.checked&&previews.disabled,'Notifications and previews start disabled');
+ enable.click();
+ await waitFor(()=>enable.checked&&!previews.disabled);
+ assert(!previews.checked,'Enabling notifications keeps previews private');
+ previews.click();
+ await waitFor(()=>previews.checked);
+ assert(notificationPrefs.enabled&&notificationPrefs.previews,'Settings persist preview choice');
+ document.querySelector('.modal-header button').click();
+ await waitFor(()=>!document.querySelector('.modal'));
+ await emit('open-mail-notification',{id:'older',account:'a'});
+ await waitFor(()=>document.querySelector('.body')?.textContent.includes('original outline'));
+ assert(document.querySelector('.list-heading h1').textContent==='All inbox','Notification opens its message in the account inbox');
+
+ const searchInput=document.querySelector('input[aria-label="Search downloaded mail"]');
+ enter(searchInput,'held','input');
+ await waitFor(()=>releaseSearch);
+ enter(searchInput,'superseded','input');
+ await new Promise(r=>setTimeout(r,300));
+ enter(searchInput,'latest','input');
+ await new Promise(r=>setTimeout(r,300));
+ assert(!calls.some(c=>c.cmd==='query_mail'&&['superseded','latest'].includes(c.args.search)),
+  'Only one mailbox query runs while the old request is in flight');
+ releaseSearch();
+ await waitFor(()=>calls.some(c=>c.cmd==='query_mail'&&c.args.search==='latest')&&!selectPage().disabled);
+ assert(!calls.some(c=>c.cmd==='query_mail'&&c.args.search==='superseded'),'Only the latest pending query runs');
+ assert(!document.querySelector('.row-subject').textContent.includes('Second page'),'Old search results are discarded');
+
+ failedJobs[0].status='running';
+ await emit('jobs-changed',false);
+ await waitFor(()=>document.querySelector('.outbox-strip strong')?.textContent.includes('running'));
+ failedJobs[0].status='done';
+ await emit('jobs-changed',false);
+ await waitFor(()=>document.querySelector('.outbox-strip strong')?.textContent.includes('failed'));
+ wake=Math.floor(Date.now()/1000)+1;
+ window.dispatchEvent(new Event('focus'));
+ await waitFor(()=>calls.filter(c=>c.cmd==='next_snooze_wake').length>=2&&!selectPage().disabled);
+ const queriesBeforeWake=calls.filter(c=>c.cmd==='query_mail').length;
+ const jobsBeforeWake=calls.filter(c=>c.cmd==='list_jobs').length;
+ const unreadBeforeWake=calls.filter(c=>c.cmd==='unread_counts').length;
+ await waitFor(()=>calls.filter(c=>c.cmd==='query_mail').length>queriesBeforeWake);
+ assert(calls.filter(c=>c.cmd==='unread_counts').length>unreadBeforeWake,'Snooze expiry refreshes unread counts');
+ await new Promise(r=>setTimeout(r,2100));
+ assert(calls.filter(c=>c.cmd==='list_jobs').length===jobsBeforeWake,'Idle WebView does not poll jobs');
+ assert(calls.filter(c=>c.cmd==='query_mail').length===queriesBeforeWake+1,'Snooze expiry refreshes the mailbox once');
+ document.title='PASS: threading reader';
+ document.documentElement.dataset.testResult='passed';
+} catch(e) {document.title='FAIL: '+e.message;document.documentElement.dataset.testResult=String(e);console.error(e)}
+</script></body></html>
+

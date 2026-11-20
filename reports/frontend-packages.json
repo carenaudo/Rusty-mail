@@ -1,0 +1,131 @@
+{
+  "scope": "npm modules with rendered code in the production bundle",
+  "lockfileSha256": "f493f43e718f381c9370c7212fe4da4fca93975dce8f89938fc19e5158476635",
+  "packages": [
+    {
+      "name": "@tauri-apps/api",
+      "version": "2.12.4",
+      "modules": [
+        "node_modules/@tauri-apps/api/external/tslib/tslib.es6.js",
+        "node_modules/@tauri-apps/api/core.js",
+        "node_modules/@tauri-apps/api/event.js"
+      ]
+    },
+    {
+      "name": "clsx",
+      "version": "2.1.1",
+      "modules": [
+        "node_modules/clsx/dist/clsx.mjs"
+      ]
+    },
+    {
+      "name": "dompurify",
+      "version": "3.4.17",
+      "modules": [
+        "node_modules/dompurify/dist/purify.es.mjs"
+      ]
+    },
+    {
+      "name": "esm-env",
+      "version": "1.2.2",
+      "modules": [
+        "node_modules/esm-env/false.js"
+      ]
+    },
+    {
+      "name": "lucide-svelte",
+      "version": "0.468.0",
+      "modules": [
+        "node_modules/lucide-svelte/dist/defaultAttributes.js",
+        "node_modules/lucide-svelte/dist/Icon.svelte",
+        "node_modules/lucide-svelte/dist/icons/archive.svelte",
+        "node_modules/lucide-svelte/dist/icons/arrow-left.svelte",
+        "node_modules/lucide-svelte/dist/icons/arrow-up-right.svelte",
+        "node_modules/lucide-svelte/dist/icons/check.svelte",
+        "node_modules/lucide-svelte/dist/icons/chevron-right.svelte",
+        "node_modules/lucide-svelte/dist/icons/clock.svelte",
+        "node_modules/lucide-svelte/dist/icons/command.svelte",
+        "node_modules/lucide-svelte/dist/icons/ellipsis.svelte",
+        "node_modules/lucide-svelte/dist/icons/file-text.svelte",
+        "node_modules/lucide-svelte/dist/icons/folder.svelte",
+        "node_modules/lucide-svelte/dist/icons/inbox.svelte",
+        "node_modules/lucide-svelte/dist/icons/list-todo.svelte",
+        "node_modules/lucide-svelte/dist/icons/mail.svelte",
+        "node_modules/lucide-svelte/dist/icons/panel-left-close.svelte",
+        "node_modules/lucide-svelte/dist/icons/paperclip.svelte",
+        "node_modules/lucide-svelte/dist/icons/pen-line.svelte",
+        "node_modules/lucide-svelte/dist/icons/refresh-cw.svelte",
+        "node_modules/lucide-svelte/dist/icons/search.svelte",
+        "node_modules/lucide-svelte/dist/icons/send.svelte",
+        "node_modules/lucide-svelte/dist/icons/settings.svelte",
+        "node_modules/lucide-svelte/dist/icons/sparkles.svelte",
+        "node_modules/lucide-svelte/dist/icons/star.svelte",
+        "node_modules/lucide-svelte/dist/icons/sun.svelte",
+        "node_modules/lucide-svelte/dist/icons/tag.svelte",
+        "node_modules/lucide-svelte/dist/icons/trash-2.svelte",
+        "node_modules/lucide-svelte/dist/icons/x.svelte"
+      ]
+    },
+    {
+      "name": "svelte",
+      "version": "5.57.3",
+      "modules": [
+        "node_modules/svelte/src/internal/shared/utils.js",
+        "node_modules/svelte/src/internal/client/constants.js",
+        "node_modules/svelte/src/constants.js",
+        "node_modules/svelte/src/internal/client/warnings.js",
+        "node_modules/svelte/src/internal/client/dom/hydration.js",
+        "node_modules/svelte/src/internal/client/reactivity/equality.js",
+        "node_modules/svelte/src/internal/shared/errors.js",
+        "node_modules/svelte/src/internal/client/errors.js",
+        "node_modules/svelte/src/internal/flags/index.js",
+        "node_modules/svelte/src/internal/shared/clone.js",
+        "node_modules/svelte/src/internal/client/context.js",
+        "node_modules/svelte/src/internal/client/dom/task.js",
+        "node_modules/svelte/src/internal/client/reactivity/status.js",
+        "node_modules/svelte/src/internal/client/reactivity/utils.js",
+        "node_modules/svelte/src/internal/client/dom/elements/misc.js",
+        "node_modules/svelte/src/internal/client/dom/elements/bindings/shared.js",
+        "node_modules/svelte/src/internal/client/reactivity/async.js",
+        "node_modules/svelte/src/internal/client/reactivity/deriveds.js",
+        "node_modules/svelte/src/internal/client/reactivity/batch.js",
+        "node_modules/svelte/src/internal/client/reactivity/sources.js",
+        "node_modules/svelte/src/internal/client/proxy.js",
+        "node_modules/svelte/src/internal/client/dom/operations.js",
+        "node_modules/svelte/src/internal/client/error-handling.js",
+        "node_modules/svelte/src/internal/client/reactivity/effects.js",
+        "node_modules/svelte/src/internal/client/runtime.js",
+        "node_modules/svelte/src/utils.js",
+        "node_modules/svelte/src/internal/client/dom/elements/events.js",
+        "node_modules/svelte/src/internal/client/dom/reconciler.js",
+        "node_modules/svelte/src/internal/client/dom/template.js",
+        "node_modules/svelte/src/reactivity/create-subscriber.js",
+        "node_modules/svelte/src/internal/client/dom/blocks/boundary.js",
+        "node_modules/svelte/src/internal/client/render.js",
+        "node_modules/svelte/src/internal/client/dom/blocks/branches.js",
+        "node_modules/svelte/src/internal/client/dom/blocks/if.js",
+        "node_modules/svelte/src/internal/client/dom/blocks/key.js",
+        "node_modules/svelte/src/internal/client/dom/blocks/each.js",
+        "node_modules/svelte/src/internal/client/dom/blocks/slot.js",
+        "node_modules/svelte/src/internal/client/dom/blocks/svelte-component.js",
+        "node_modules/svelte/src/internal/client/dom/blocks/svelte-element.js",
+        "node_modules/svelte/src/internal/client/dom/elements/actions.js",
+        "node_modules/svelte/src/internal/client/dom/elements/attachments.js",
+        "node_modules/svelte/src/internal/shared/attributes.js",
+        "node_modules/svelte/src/internal/client/dom/elements/class.js",
+        "node_modules/svelte/src/internal/client/dom/elements/style.js",
+        "node_modules/svelte/src/internal/client/dom/elements/bindings/select.js",
+        "node_modules/svelte/src/internal/client/dom/elements/attributes.js",
+        "node_modules/svelte/src/internal/client/dom/elements/bindings/input.js",
+        "node_modules/svelte/src/internal/client/dom/elements/bindings/this.js",
+        "node_modules/svelte/src/internal/client/dom/legacy/lifecycle.js",
+        "node_modules/svelte/src/internal/client/reactivity/store.js",
+        "node_modules/svelte/src/internal/client/reactivity/props.js",
+        "node_modules/svelte/src/index-client.js",
+        "node_modules/svelte/src/version.js",
+        "node_modules/svelte/src/internal/disclose-version.js",
+        "node_modules/svelte/src/internal/flags/legacy.js"
+      ]
+    }
+  ]
+}

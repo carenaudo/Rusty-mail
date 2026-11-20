@@ -1,0 +1,16 @@
+{
+  "accounts": 3,
+  "broad_and_deep_samples": 5,
+  "broad_search_p95_ms": 42.7225,
+  "build": "debug",
+  "deep_offset_page_p95_ms": 3.2462,
+  "downloaded_bodies": 3000,
+  "encrypted": true,
+  "ingest_ms": 1344,
+  "messages": 3000,
+  "page_p95_ms": 3.0986,
+  "read_p95_ms": 0.11309999999999999,
+  "samples": 50,
+  "schema_version": 5,
+  "search_p95_ms": 7.9521999999999995
+}

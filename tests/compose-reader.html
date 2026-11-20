@@ -1,0 +1,198 @@
+<!doctype html><html lang="en"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Compose fixture</title></head><body><div id="app"></div><script type="module">
+import {mount,tick} from 'svelte';
+import {mockIPC} from '@tauri-apps/api/mocks';
+import LiveApp from '/src/LiveApp.svelte';
+import '/src/style.css';
+const file={id:'original-file',name:'outline.txt',size:120,mime:'text/plain'};
+const message={id:'m',account_id:'a',account:'me@example.com',provider:'google',remote_id:'remote',thread_id:'thread',conversation_key:'native:thread',conversation_count:1,message_id:'<source@example.com>',sender:'Elena',address:'elena@example.com',subject:'An outline',body:'Original text',to:['me@example.com'],cc:['copy@example.com'],reply_to:['reply@example.com'],html_body:'',folder:'inbox',category:'people',unread:false,starred:false,loaded:true,attachments:[file],date:'2026-11-03T12:00:00Z'};
+const calls=[],drafts=new Map();
+let saved=null,slowCopy=false,queuedDraft=null,queuedJob=null,failSend=false;
+const signatures={a:'Primary signature',b:'Other signature'};
+mockIPC(async(cmd,args)=>{
+ calls.push({cmd,args});
+ if(cmd==='list_mailboxes')return [];
+ if(cmd==='get_signatures')return {...signatures};
+ if(cmd==='set_signature')return signatures[args.accountId]=args.signature.trim();
+ if(cmd==='get_account_aliases')return {};
+ if(cmd==='notification_preferences')return {enabled:false,previews:false};
+ if(cmd==='recent_recipients')return args.accountId==='a'
+  ?[{address:'example@example.com',formatted:'"Example, Recent" <example@example.com>'}]
+  :[{address:'second@example.com',formatted:'second@example.com'}];
+ if(cmd==='unread_counts')return {a:2};
+ if(cmd==='next_snooze_wake')return null;
+ if(cmd==='list_accounts')return [{id:'a',email:'me@example.com',provider:'google'},{id:'b',email:'other@example.com',provider:'imap'}];
+ if(cmd==='query_mail')return {messages:[message],total:1,next_cursor:null};
+ if(cmd==='get_mail')return message;
+ if(cmd==='get_conversation')return [message];
+ if(cmd==='save_attachment')return true;
+ if(cmd==='list_jobs')return queuedJob?[queuedJob]:[];
+ if(cmd==='prepare_compose')return {draft:{account_id:'a',to:args.mode==='forward'?'':'reply@example.com',cc:args.mode==='reply_all'?'copy@example.com':'',bcc:'',subject:(args.mode==='forward'?'Fwd: ':'Re: ')+message.subject,body:'Quoted original text',attachments:[],reply_message_id:args.mode==='forward'?null:message.message_id,source_message_id:'m',mode:args.mode},available_attachments:args.mode==='forward'?[file]:[]};
+ if(cmd==='save_live_draft'){
+  saved=structuredClone(args.draft);
+  drafts.set(args.id,saved);
+  return null;
+ }
+ if(cmd==='list_live_drafts')return {drafts:[...drafts].reverse()
+  .filter(([id,draft])=>!args.accountId||draft.account_id===args.accountId)
+  .map(([id,draft])=>({id,account_id:draft.account_id,subject:draft.subject,to:draft.to,updated:Date.now()})),next_offset:null};
+ if(cmd==='load_live_draft')return drafts.get(args.id);
+ if(cmd==='discard_live_draft'){drafts.delete(args.id);return null}
+ if(cmd==='outgoing_attachments')return args.ids.map(id=>({...file,id}));
+ if(cmd==='copy_forward_attachments'){if(slowCopy)await new Promise(r=>setTimeout(r,200));return [{...file,id:'outgoing-copy'}]}
+ if(cmd==='queue_send'){
+  if(failSend)throw Error('Synthetic send error');
+  queuedDraft=[args.draftId,drafts.get(args.draftId)];
+  drafts.delete(args.draftId);
+  queuedJob={id:'job',account_id:args.draft.account_id,kind:'send',status:'pending',detail:'Waiting',due:0};
+  return 'job';
+ }
+ if(cmd==='cancel_job'){drafts.set(...queuedDraft);queuedJob=null;return null}
+ throw Error('Unexpected IPC: '+cmd);
+},{shouldMockEvents:true});
+mount(LiveApp,{target:document.getElementById('app')});
+const assert=(ok,label)=>{if(!ok)throw Error(label)};
+async function waitFor(check){for(let i=0;i<150;i++){await new Promise(r=>setTimeout(r,20));await tick();if(check())return}throw Error('Timed out')}
+const button=text=>[...document.querySelectorAll('button')].find(b=>b.textContent.trim()===text);
+const field=text=>[...document.querySelectorAll('.modal label')].find(l=>l.textContent.startsWith(text))?.querySelector('input,select,textarea');
+const set=(el,value)=>{el.value=value;el.dispatchEvent(new Event(el.tagName==='SELECT'?'change':'input',{bubbles:true}))};
+async function close(){button('Save draft').click();await waitFor(()=>!document.querySelector('.modal'))}
+try{
+ await waitFor(()=>document.querySelector('.message'));document.querySelector('.message').click();
+ await waitFor(()=>button('Reply all')&&!button('Reply all').disabled);
+ document.querySelector('.attachment-list button').click();
+ const securityDialog=()=>document.querySelector('dialog.security-confirmation[open]');
+ await waitFor(securityDialog);
+ assert(securityDialog().textContent.includes('outline.txt'),'Attachment warning identifies the file');
+ assert(!calls.some(c=>c.cmd==='save_attachment'),'Save waits for confirmation');
+ securityDialog().querySelector('button').click();
+ await waitFor(()=>!securityDialog());
+ assert(!calls.some(c=>c.cmd==='save_attachment'),'Cancelling does not save the attachment');
+ document.querySelector('.attachment-list button').click();
+ await waitFor(securityDialog);
+ securityDialog().querySelector('button:last-child').click();
+ await waitFor(()=>calls.some(c=>c.cmd==='save_attachment'&&c.args.messageId==='m'&&c.args.id===file.id));
+ const start=performance.now();const replyAllButton=button('Reply all');replyAllButton.focus();replyAllButton.click();await waitFor(()=>document.querySelector('.modal'));
+ const composeMs=performance.now()-start;
+ assert(field('To').value==='reply@example.com'&&field('Cc').value==='copy@example.com'&&!field('Bcc'),'Reviewed reply-all recipients');
+ assert(document.activeElement===field('Message')&&field('Message').selectionStart===0,'Reply focuses the start of the body');
+ assert(field('Signature').value==='Primary signature','Reply has account signature');
+ button('Add Bcc').click();
+ await waitFor(()=>field('Bcc')&&document.activeElement===field('Bcc'));
+ const closeButton=document.querySelector('.modal-header button');
+ closeButton.focus();
+ closeButton.dispatchEvent(new KeyboardEvent('keydown',{key:'Tab',shiftKey:true,bubbles:true,cancelable:true}));
+ assert(document.activeElement===button('Discard'),'Shift-Tab wraps to the last visible composer control');
+ document.activeElement.dispatchEvent(new KeyboardEvent('keydown',{key:'Tab',bubbles:true,cancelable:true}));
+ assert(document.activeElement===closeButton,'Tab returns focus to the start of the dialog');
+ set(field('Signature'),'Edited signature');
+ set(field('Bcc'),'private@example.com');await close();
+ await waitFor(()=>document.activeElement===replyAllButton);
+ assert(saved.mode==='reply_all'&&saved.source_message_id==='m'&&saved.bcc==='private@example.com','Draft preserves mode, source and Bcc');
+ const replyId=[...drafts.keys()][0];
+ document.body.dispatchEvent(new KeyboardEvent('keydown',{key:'c',bubbles:true}));await waitFor(()=>document.querySelector('.modal'));
+ assert(!field('Bcc')&&!field('Cc')&&field('Subject').value==='','Compose starts with optional recipients hidden');
+ assert(document.activeElement===field('To'),'New message focuses To');
+ const toField=field('To');
+ toField.focus();
+ set(toField,'"Separate, Name" <separate@example.com>, rece');
+ await waitFor(()=>toField.getAttribute('aria-expanded')==='true');
+ toField.dispatchEvent(new KeyboardEvent('keydown',{key:'ArrowDown',bubbles:true}));
+ await tick();
+ toField.dispatchEvent(new KeyboardEvent('keydown',{key:'Enter',bubbles:true}));
+ await waitFor(()=>toField.value.endsWith('<example@example.com>'));
+ assert(toField.value.startsWith('"Separate, Name" <separate@example.com>, '),'Autocomplete preserves quoted names and previous recipients');
+ set(field('Subject'),'Second draft');await close();
+ assert(drafts.size===2,'Two drafts can coexist for one account');
+ button('Drafts').click();
+ await waitFor(()=>document.querySelectorAll('.draft-row').length===2);
+ document.querySelector('.draft-row:nth-child(2)').click();
+ await waitFor(()=>document.querySelector('.modal'));
+ assert(field('Bcc').value==='private@example.com','The selected reply restores its Bcc');
+ assert(field('Signature').value==='Edited signature','The draft restores its edited signature');
+ assert(document.activeElement===field('Message')&&field('Message').selectionStart===field('Message').value.length,'Reopening a populated draft focuses the end of the body');
+
+ set(field('From'),'b');
+ await waitFor(()=>field('Signature').value==='Other signature');
+ const bccField=field('Bcc');
+ bccField.focus();set(bccField,'second');
+ await waitFor(()=>bccField.getAttribute('aria-expanded')==='true');
+ assert([...document.querySelectorAll('.recipients:not([hidden]) button')].every(option=>option.textContent==='second@example.com'),'Suggestions follow the sending account');
+ await close();
+ assert(saved.account_id==='b'&&saved.source_message_id===null&&saved.reply_message_id===null&&saved.mode==='new','Changing account clears reply context');
+ assert(drafts.get(replyId).account_id==='b'&&drafts.size===2,'Changing accounts moves only the selected draft');
+ document.querySelectorAll('.account')[1].click();
+ await waitFor(()=>document.querySelectorAll('.draft-row').length===1);
+ assert(document.querySelector('.draft-row').textContent.includes('Second draft'),'Drafts respect the account selection');
+ document.querySelector('.draft-row').click();
+ await waitFor(()=>document.querySelector('.modal'));
+ button('Discard').click();await tick();button('Keep editing').click();await tick();
+ assert(drafts.size===2,'Discard requires confirmation');
+ button('Discard').click();await tick();button('Discard draft').click();
+ await waitFor(()=>!document.querySelector('.modal')&&!document.querySelector('.draft-row'));
+ assert(drafts.size===1&&drafts.has(replyId),'Discard removes only the selected draft');
+ button('All accounts').click();
+ document.querySelector('nav button').click();
+ await waitFor(()=>document.querySelector('.message'));document.querySelector('.message').click();
+ await waitFor(()=>button('Forward')&&!button('Forward').disabled);
+ button('Forward').click();await waitFor(()=>document.querySelector('.modal'));
+ assert(field('To').value===''&&!field('Cc')&&!field('Bcc'),'Forward starts without recipients');
+ assert(document.activeElement===field('To'),'Forward focuses To');
+ assert(!calls.some(c=>c.cmd==='copy_forward_attachments'),'No attachments copied implicitly');
+ document.querySelector('.forward-attachments input').click();await tick();button('Include selected attachments').click();
+ await waitFor(()=>!document.querySelector('.forward-attachments'));
+ await close();assert(saved.attachments[0]==='outgoing-copy','Explicit attachment uses owned copy');
+ button('Forward').click();await waitFor(()=>document.querySelector('.modal'));
+ slowCopy=true;document.querySelector('.forward-attachments input').click();await tick();button('Include selected attachments').click();
+ set(field('From'),'b');await new Promise(r=>setTimeout(r,300));await tick();await close();
+ assert(saved.attachments.length===0&&saved.source_message_id===null,'Slow attachment copy cannot cross sending accounts');
+ button('Reply').click();await waitFor(()=>document.querySelector('.modal'));
+ button('Add Bcc').click();
+ await waitFor(()=>field('Bcc'));
+ set(field('Bcc'),'private@example.com');
+ failSend=true;button('Send').click();
+ await waitFor(()=>document.querySelector('.compose-error')?.textContent.includes('Synthetic send error'));
+ assert(field('Bcc').value==='private@example.com'&&field('Message').value.includes('Quoted'),'Send failure keeps the edited draft open');
+ failSend=false;button('Send').click();await waitFor(()=>!document.querySelector('.modal'));
+ const queued=calls.findLast(c=>c.cmd==='queue_send').args.draft;
+ assert(queued.signature==='Primary signature','Queue captures the reviewed signature');
+ assert(queued.mode==='reply'&&queued.bcc==='private@example.com'&&queued.source_message_id==='m','Queue receives reviewed draft');
+ const [queuedId]=queuedDraft;
+ assert(!drafts.has(queuedId),'Queued message is hidden from Drafts');
+ await waitFor(()=>button('Cancel'));
+ button('Cancel').click();
+ await waitFor(()=>drafts.has(queuedId));
+ button('Drafts').click();
+ await waitFor(()=>[...document.querySelectorAll('.draft-row')].some(row=>row.textContent.includes('Re: An outline')));
+ assert(drafts.get(queuedId).bcc==='private@example.com','Cancellation restores the same draft');
+ button('Settings').click();
+ await waitFor(()=>field('Signature for me@example.com'));
+ set(field('Signature for me@example.com'),'Updated in Settings');
+ button('Save signature').click();
+ await waitFor(()=>signatures.a==='Updated in Settings');
+ document.querySelector('.modal-header button').click();
+ await waitFor(()=>!document.querySelector('.modal'));
+ document.body.dispatchEvent(new KeyboardEvent('keydown',{key:'c',bubbles:true}));
+ await waitFor(()=>field('Signature')?.value==='Updated in Settings');
+ button('Remove signature').click();await tick();
+ assert(!field('Signature'),'Signature can be removed for the current message');
+ button('Insert signature').click();await tick();
+ assert(field('Signature').value==='Updated in Settings','Signature can be restored from the account default');
+
+ document.querySelector('.modal-header button').click();
+ await waitFor(()=>!document.querySelector('.modal'));
+ button('Settings').click();
+ await waitFor(()=>document.querySelector('.modal select'));
+ const language=document.querySelector('.modal select');
+ language.value='es';
+ language.dispatchEvent(new Event('change',{bubbles:true}));
+ await waitFor(()=>document.querySelector('.modal h2').textContent==='Tus preferencias');
+ assert(document.documentElement.lang==='es'&&localStorage.getItem('rusty-mail-language')==='es','Spanish updates the document language and persists');
+ assert(document.querySelector('.compose').textContent.includes('Redactar'),'The main mailbox updates immediately');
+ language.value='en';
+ language.dispatchEvent(new Event('change',{bubbles:true}));
+ await waitFor(()=>document.querySelector('.modal h2').textContent==='Your preferences');
+
+ document.documentElement.dataset.testResult='passed';document.title='PASS: compose reader';
+ document.documentElement.dataset.composeMs=String(composeMs);
+}catch(e){document.documentElement.dataset.testResult=String(e);document.title='FAIL: '+e.message;console.error(e)}
+</script></body></html>

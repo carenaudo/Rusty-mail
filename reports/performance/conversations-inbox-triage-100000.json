@@ -1,0 +1,41 @@
+{
+  "build": "debug",
+  "encrypted": true,
+  "engine_sha256": "afe3bb5c25c6fde4bc5d1f37f9475c7f8dc72e54e26f23edf682d0b627690f88",
+  "fixture": "30 messages per provider thread across 3 accounts; 20k cached bodies and HTML",
+  "label": "inbox-triage",
+  "measured_utc": "2026-11-10T21:27:29.372422700+00:00",
+  "messages": 100000,
+  "timings": {
+    "broad_search": {
+      "p50_ms": 193.5385,
+      "p95_ms": 197.03979999999999,
+      "samples": 3
+    },
+    "cached_message": {
+      "p50_ms": 0.0645,
+      "p95_ms": 0.0775,
+      "samples": 50
+    },
+    "conversation_members": {
+      "p50_ms": 0.7083,
+      "p95_ms": 1.0698,
+      "samples": 50
+    },
+    "conversation_page": {
+      "p50_ms": 4.4839,
+      "p95_ms": 4.6799,
+      "samples": 3
+    },
+    "next_page": {
+      "p50_ms": 5.1749,
+      "p95_ms": 5.702999999999999,
+      "samples": 3
+    },
+    "scoped_search": {
+      "p50_ms": 47.1597,
+      "p95_ms": 49.0748,
+      "samples": 3
+    }
+  }
+}

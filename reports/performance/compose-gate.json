@@ -1,0 +1,77 @@
+{
+  "passed": true,
+  "baseline": "before-compose",
+  "candidate": "after-compose-final",
+  "checks": [
+    {
+      "messages": 100000,
+      "action": "cached_message",
+      "baseline_p95_ms": 0.0799,
+      "candidate_p95_ms": 0.0803,
+      "limit_ms": 10.10387
+    },
+    {
+      "messages": 100000,
+      "action": "conversation_members",
+      "baseline_p95_ms": 1.0443,
+      "candidate_p95_ms": 1.0539,
+      "limit_ms": 11.35759
+    },
+    {
+      "messages": 100000,
+      "action": "conversation_page",
+      "baseline_p95_ms": 6303.6964,
+      "candidate_p95_ms": 171.2459,
+      "limit_ms": 8204.80532
+    },
+    {
+      "messages": 100000,
+      "action": "next_page",
+      "baseline_p95_ms": 6321.5156,
+      "candidate_p95_ms": 168.99140000000003,
+      "limit_ms": 8227.97028
+    },
+    {
+      "messages": 100000,
+      "action": "scoped_search",
+      "baseline_p95_ms": 284.6288,
+      "candidate_p95_ms": 53.135000000000005,
+      "limit_ms": 380.01744
+    },
+    {
+      "messages": 500000,
+      "action": "cached_message",
+      "baseline_p95_ms": 0.0666,
+      "candidate_p95_ms": 0.0743,
+      "limit_ms": 10.08658
+    },
+    {
+      "messages": 500000,
+      "action": "conversation_members",
+      "baseline_p95_ms": 0.8497,
+      "candidate_p95_ms": 1.2535999999999998,
+      "limit_ms": 11.104610000000001
+    },
+    {
+      "messages": 500000,
+      "action": "conversation_page",
+      "baseline_p95_ms": 28748.4539,
+      "candidate_p95_ms": 3396.9947,
+      "limit_ms": 37382.99007
+    },
+    {
+      "messages": 500000,
+      "action": "next_page",
+      "baseline_p95_ms": 30771.7798,
+      "candidate_p95_ms": 3326.3878,
+      "limit_ms": 40013.313740000005
+    },
+    {
+      "messages": 500000,
+      "action": "scoped_search",
+      "baseline_p95_ms": 299.6645,
+      "candidate_p95_ms": 49.494099999999996,
+      "limit_ms": 399.56385
+    }
+  ]
+}

@@ -1,0 +1,22 @@
+{
+  "accounts": 3,
+  "broad_and_deep_samples": 5,
+  "broad_search_p95_ms": 53.3108,
+  "broad_search_with_snooze_p95_ms": 49.8169,
+  "build": "debug",
+  "deep_cursor_page_p95_ms": 4.5762,
+  "deep_offset_page_p95_ms": 165.6137,
+  "downloaded_bodies": 20000,
+  "encrypted": true,
+  "engine_source_sha256": "60355ac7c9c15f54471b800d079a2c0990436c75681aa2f5f03ab6d2d6ded397",
+  "fixture_retained": true,
+  "fixture_reused": false,
+  "ingest_ms": 44776,
+  "measured_utc": "2026-10-29T12:43:12.718356400+00:00",
+  "messages": 100000,
+  "page_p95_ms": 1.7048,
+  "read_p95_ms": 0.1205,
+  "samples": 50,
+  "schema_version": 6,
+  "search_p95_ms": 30.207
+}
