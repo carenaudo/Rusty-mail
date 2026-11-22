@@ -11,7 +11,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 pub const MAX_RAW: usize = 25 * 1024 * 1024;
 pub const MAX_ATTACHMENTS: usize = 256;
 pub const MAX_HTML: usize = 1_000_000;
-pub const SCHEMA_VERSION: i64 = 13;
+pub const SCHEMA_VERSION: i64 = 15;
 pub const BODY_FORMAT_VERSION: u8 = 2;
 pub fn now() -> i64 {
     SystemTime::now()
@@ -352,8 +352,7 @@ pub fn migrate(db: &Connection) -> Result<(), String> {
  CREATE TABLE IF NOT EXISTS ai_consent(account_id TEXT NOT NULL,endpoint TEXT NOT NULL,PRIMARY KEY(account_id,endpoint));
  CREATE TABLE IF NOT EXISTS live_drafts(account_id TEXT PRIMARY KEY,payload TEXT NOT NULL);
  CREATE TABLE IF NOT EXISTS snoozes(id TEXT PRIMARY KEY,wake INTEGER NOT NULL);
- UPDATE jobs SET status='uncertain',detail='App stopped during submission. Check Sent before choosing to send again.' WHERE kind='send' AND status='running';
- UPDATE jobs SET status='pending' WHERE kind='mutation' AND status='running';") .map_err(|e|e.to_string())?;
+ UPDATE jobs SET status='uncertain',detail='App stopped during submission. Check Sent before choosing to send again.' WHERE kind='send' AND status='running';") .map_err(|e|e.to_string())?;
         if version < 3 {
             db.execute_batch("DROP TABLE mail_search; CREATE VIRTUAL TABLE mail_search USING fts5(id UNINDEXED,account_id,sender,subject,body,tokenize='unicode61'); INSERT INTO mail_search(rowid,id,account_id,sender,subject,body) SELECT rowid,id,account_id,json_extract(payload,'$.sender'),json_extract(payload,'$.subject'),json_extract(payload,'$.body') FROM mail; PRAGMA user_version=3;").map_err(|e|e.to_string())?;
         }
@@ -460,6 +459,15 @@ pub fn migrate(db: &Connection) -> Result<(), String> {
             db.execute_batch(include_str!("schema-v13.sql"))
                 .map_err(|e| e.to_string())?;
         }
+        if version < 14 {
+            db.execute_batch(include_str!("schema-v14.sql"))
+                .map_err(|e| e.to_string())?;
+        }
+        if version < 15 {
+            db.execute_batch(include_str!("schema-v15.sql"))
+                .map_err(|e| e.to_string())?;
+        }
+        crate::reconcile::recover_running(db)?;
         Ok(())
     })
 }

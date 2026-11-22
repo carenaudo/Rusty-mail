@@ -15,8 +15,11 @@
  type Message={id:string;account_id:string;remote_id:string;provider:string;thread_id:string;conversation_key:string;conversation_count:number;message_id:string;headers_shortened:boolean;account:string;sender:string;address:string;subject:string;body:string;html_body:string;to?:string[];cc?:string[];reply_to?:string[];category:string;unread:boolean;starred:boolean;folder:string;date:string;loaded:boolean;attachments:File[];labels?:string[]};
  type Job={id:string;account_id:string;kind:string;status:string;detail:string;due:number};
  type Info={configured:boolean;endpoint:string;model:string;hosted:boolean;consent:boolean};
+ type SyncStatus={account_id:string;last_success:number|null;error:string|null};
+ type AiSelection={id:string;accountId:string;task:string;version:number;requestId:string};
  type Cursor={received:number;id:string};
  type MailFilters={unread:boolean;sender:string;received_from:number|null;received_before:number|null};
+ type FilterKey='unread'|'sender'|'from'|'through';
  type PageRequest={version:number;scope:ReturnType<typeof mailScope>;cursor:Cursor|null;draftOffset:number};
  type DraftSummary={id:string;account_id:string;subject:string;to:string;updated:number};
  type DraftPage={drafts:DraftSummary[];next_offset:number|null};
@@ -32,17 +35,28 @@
  ];
  const activeStatus=(job:Job)=>['pending','running','uncertain','failed'].includes(job.status);
  let unreadOnly=$state(false),senderFilter=$state(''),receivedFrom=$state(''),receivedThrough=$state('');
- let filterSummary=$derived([
-  unreadOnly?t('Unread only'):'',senderFilter.trim()?t('From {sender}',{sender:senderFilter.trim()}):'',
-  receivedFrom?t('From date {date}',{date:receivedFrom}):'',receivedThrough?t('Through {date}',{date:receivedThrough}):''
- ].filter(Boolean));
+ let filterSummary=$derived.by(()=>{
+  const active:{key:FilterKey;label:string}[]=[];
+  if(unreadOnly)active.push({key:'unread',label:t('Unread only')});
+  if(senderFilter.trim())active.push({key:'sender',label:t('From {sender}',{sender:senderFilter.trim()})});
+  if(receivedFrom)active.push({key:'from',label:t('From date {date}',{date:receivedFrom})});
+  if(receivedThrough)active.push({key:'through',label:t('Through {date}',{date:receivedThrough})});
+  return active;
+ });
  let filterError=$derived(receivedFrom&&receivedThrough&&receivedFrom>receivedThrough?t('Start date must be on or before the end date.'):'');
  let queryPending=$state(false),queryTimer:ReturnType<typeof setTimeout>|undefined;
  let checkedRows=$state<string[]>([]),bulkBusy=$state(false),messageActionBusy=$state(false),readerMenu=$state<HTMLDetailsElement>();
  let operations=$state(false),operationOffset=$state(0),operationsBusy=$state(false),operationVersion=0;
  let activePage=$state<ActiveJobPage>({jobs:[],next_offset:null});
  let pageCursor:Cursor|null=$state(null),nextCursor:Cursor|null=$state(null),cursorStack:(Cursor|null)[]=$state([]),pageBusy=$state(false);
- let accounts:Account[]=$state([]),messages:Message[]=$state([]),jobs:Job[]=$state([]),current:Message|null=$state(null),account=$state(''),folder=$state('inbox'),search=$state(''),total=$state(0),busy=$state(false),error=$state(''),notice=$state(''),focus=$state(false),dark=$state(window.matchMedia('(prefers-color-scheme: dark)').matches),settings=$state(false),compose=$state(false),palette=$state(false),status=$state(''),ai=$state(''),aiBusy=$state(false),consent:Info|null=$state(null),consentAccount=$state(''),aiTask=$state('summary');
+ let accounts:Account[]=$state([]),messages:Message[]=$state([]),jobs:Job[]=$state([]),current:Message|null=$state(null),account=$state(''),folder=$state('inbox'),search=$state(''),total=$state(0),busy=$state(false),error=$state(''),notice=$state(''),focus=$state(false),dark=$state(window.matchMedia('(prefers-color-scheme: dark)').matches),settings=$state(false),compose=$state(false),palette=$state(false),ai=$state(''),aiBusy=$state(false),consent:Info|null=$state(null);
+ let aiSelection=$state.raw<AiSelection|null>(null);
+ let syncStatuses=$state.raw<Record<string,SyncStatus>>({});
+ let syncStatusVersion=0;
+ let syncingAccount=$state('');
+ let syncNeedsAttention=$derived(accounts.some(a=>!!syncStatuses[a.id]?.error));
+ let activeAi:Promise<void>|null=null;
+ let dispatchedAi:AiSelection|null=null;
  type NotificationPreferences={enabled:boolean;previews:boolean};
  type NotificationArrival={id:string;account:string};
  let unreadCounts=$state<Record<string,number>>({});
@@ -89,14 +103,14 @@
   account:a,mailboxes:mailboxes.filter(box=>box.account_id===a.id)
  })).filter(group=>group.mailboxes.length));
  let readerMailboxes=$derived(mailboxes.filter(box=>box.account_id===current?.account_id));
- let mailboxTitle=$derived(folder==='inbox'?t('All inbox'):folder==='drafts'?t('Drafts'):
+ let mailboxTitle=$derived(folder==='inbox'?t('All inbox'):folder==='drafts'?t('Drafts'):folder==='snoozed'?t('Snoozed'):
   mailboxes.find(box=>box.account_id===account&&folder==='mailbox:'+box.id)?.name||folderName(folder));
  let catalogVersion=0;
  let allRowsChecked=$derived(messages.length>0&&checkedRows.length===messages.length);
- let conversation:Message[]=$state([]),selectedId=$state(""),openVersion=0,loadError=$state('');
+ let conversation:Message[]=$state([]),selectedId=$state(""),openVersion=$state(0),loadError=$state('');
  let updateOffer:{enabled:boolean;version:string|null;notes:string|null}|null=$state(null);let updateBusy=$state(false);
  let from=$state(''),to=$state(''),cc=$state(''),bcc=$state(''),sourceId:string|null=$state(null),composeMode=$state('new'),forwardChoices:File[]=$state([]),forwardSelected:string[]=$state([]),composeBusy=$state(false),aliasValues:Record<string,string>=$state({}),subject=$state(''),body=$state(''),files:File[]=$state([]),replyId:string|null=$state(null),fontSize=$state(16),lineWidth=$state(840),compact=$state(false),queryVersion=0;
- async function refreshAccounts(){accounts=await invoke<Account[]>('list_accounts');await loadSignatures();if(!from&&accounts.length)from=accounts[0].id;void refreshUnread();await page();await refreshMailboxes();if(accounts.length&&accounts.every(a=>a.provider==='synthetic')){await tick();await new Promise<void>(r=>requestAnimationFrame(()=>requestAnimationFrame(()=>r())));await invoke('synthetic_profile_ready',{rows:messages.length})}}
+ async function refreshAccounts(){accounts=await invoke<Account[]>('list_accounts');void refreshSyncStatuses();await loadSignatures();if(!from&&accounts.length)from=accounts[0].id;void refreshUnread();await page();await refreshMailboxes();if(accounts.length&&accounts.every(a=>a.provider==='synthetic')){await tick();await new Promise<void>(r=>requestAnimationFrame(()=>requestAnimationFrame(()=>r())));await invoke('synthetic_profile_ready',{rows:messages.length})}}
  function localDateBoundary(value:string,followingDay=false){
   if(!value)return null;
   const date=new Date(value+'T00:00:00');
@@ -182,6 +196,37 @@
   unreadOnly=false;senderFilter='';receivedFrom='';receivedThrough='';
   changeScope();
  }
+ async function removeFilter(key:FilterKey,event:MouseEvent){
+  const button=event.currentTarget as HTMLButtonElement;
+  const previous=button.previousElementSibling;
+  const next=button.nextElementSibling;
+  switch(key){
+   case 'unread': unreadOnly=false;break;
+   case 'sender': senderFilter='';break;
+   case 'from': receivedFrom='';break;
+   case 'through': receivedThrough='';break;
+  }
+  changeScope();
+  await tick();
+  const remaining=[next,previous].find((item):item is HTMLButtonElement=>item instanceof HTMLButtonElement&&item.isConnected);
+  (remaining??filtersMenu?.querySelector('summary'))?.focus();
+ }
+ let filtersMenu=$state<HTMLDetailsElement>(),filterChips=$state<HTMLDivElement>();
+ let readerSender=$derived.by(()=>{
+  const address=current?.address.trim()??'';
+  return address.length<=512&&!/[\u0000-\u001f\u007f-\u009f]/.test(address)
+   &&new TextEncoder().encode(address).length<=512?address:'';
+ });
+ async function filterBySender(){
+  const address=readerSender;
+  if(!address)return;
+  if(readerMenu)readerMenu.open=false;
+  senderFilter=address;
+  focus=false;
+  changeScope();
+  await tick();
+  filterChips?.querySelector<HTMLButtonElement>('[data-filter="sender"]')?.focus();
+ }
  function nextPage(){
   if(pageBusy||!nextCursor)return;
   checkedRows=[];
@@ -242,18 +287,54 @@
   }catch(e){error=String(e)}
   finally{messageActionBusy=false}
  }
- async function refresh(){busy=true;error='';try{for(const a of accounts.filter(a=>!account||a.id===account)){status=t('Synchronizing {email}…',{email:a.email});await invoke('sync_account',{id:a.id})}status=t('Synchronization finished')}catch(e){error=String(e);status=t('Sync needs attention')}finally{void refreshUnread();await Promise.all([page(),refreshMailboxes().catch(e=>error=String(e))]);busy=false}}
+ async function refreshSyncStatuses(){
+  const version=++syncStatusVersion;
+  try{
+   const rows=await invoke<SyncStatus[]>('list_sync_statuses');
+   if(version===syncStatusVersion)syncStatuses=Object.fromEntries(rows.map(row=>[row.account_id,row]));
+  }catch(e){if(version===syncStatusVersion)error=String(e)}
+ }
+ async function refresh(){
+  if(busy)return;
+  const targets=accounts.filter(a=>!account||a.id===account);
+  if(!targets.length)return;
+  busy=true;
+  let failed=0;
+  try{
+   for(const target of targets){
+    syncingAccount=target.id;
+    try{await invoke('sync_account',{id:target.id})}
+    catch{failed++}
+   }
+   notice=failed?t(failed===1?'One account sync needs attention':'{count} account syncs need attention',{count:failed}):t('Synchronization finished');
+  }finally{
+   syncingAccount='';
+   void refreshUnread();
+   await Promise.all([page(),refreshMailboxes().catch(e=>error=String(e)),refreshSyncStatuses()]);
+   busy=false;
+  }
+ }
  function navigate(next:string){closeNavigation(true);folder=next;current=null;conversation=[];openVersion++;changeScope()}
  function selectAccount(id:string){
   closeNavigation(true);
   if(account!==id&&folder.startsWith('mailbox:')){account=id;navigate('inbox');return}
+  if(account!==id){current=null;conversation=[];openVersion++}
   account=id;changeScope();
  }
  function sameConversation(a:Message,b:Message){return a.id===b.id||!!a.conversation_key&&a.account_id===b.account_id&&a.conversation_key===b.conversation_key}
- async function reloadConversation(id:string){const version=openVersion;const members=await invoke<Message[]>('get_conversation',{id});if(version===openVersion&&current&&members.some(m=>m.id===current?.id))conversation=members}
+ async function reloadConversation(id:string){
+  const version=openVersion;
+  const members=await invoke<Message[]>('get_conversation',{id});
+  if(version!==openVersion||!current)return;
+  const selected=members.find(m=>m.id===current?.id);
+  if(!selected)return;
+  conversation=members;
+  current={...current,unread:selected.unread,starred:selected.starred,folder:selected.folder,labels:selected.labels};
+ }
  async function expand(m:Message){
   const version=++openVersion;
   if(readerMenu)readerMenu.open=false;
+  if(snoozeMenu)snoozeMenu.open=false;
   current={...m,loaded:false};loadError='';error='';ai='';
   try{
    const full=await invoke<Message>('get_mail',{id:m.id});
@@ -307,21 +388,73 @@
  }
  let snoozeTimer:ReturnType<typeof setTimeout>|undefined;
  let snoozeVersion=0;
+ let snoozeMenu=$state<HTMLDetailsElement>();
+ let selectedWake=$state<number|null>(null);
+ let snoozeLookupVersion=0;
+ async function refreshSelectedSnooze(){
+  const version=++snoozeLookupVersion;
+  const id=current?.id;
+  selectedWake=null;
+  if(!snoozeMenu?.open||!id)return;
+  if(readerMenu)readerMenu.open=false;
+  try{
+   const wake=await invoke<number|null>('message_snooze_wake',{id});
+   if(version===snoozeLookupVersion&&current?.id===id&&snoozeMenu?.open)selectedWake=wake;
+  }catch(e){if(version===snoozeLookupVersion&&current?.id===id)error=t(String(e))}
+ }
+ function closeSnoozeMenu(){
+  if(snoozeMenu?.open)closeDisclosure(snoozeMenu);
+ }
  async function scheduleSnooze(){
   const version=++snoozeVersion;
   clearTimeout(snoozeTimer);
   try{
    const wake=await invoke<number|null>('next_snooze_wake');
    if(version!==snoozeVersion||wake===null)return;
-   const delay=wake*1000-Date.now();
-   snoozeTimer=setTimeout(()=>{
+   const refreshAtWake=()=>{
     if(version!==snoozeVersion)return;
-    if(Date.now()>=wake*1000){void page();void refreshUnread()}
-    void scheduleSnooze();
-   },Math.min(Math.max(delay,0),2_147_483_647));
+    const remaining=wake*1000-Date.now();
+    if(remaining>0){
+     snoozeTimer=setTimeout(refreshAtWake,Math.min(remaining,2_147_483_647));
+    }else{
+     void page();void refreshUnread();void scheduleSnooze();
+     if(snoozeMenu?.open)void refreshSelectedSnooze();
+    }
+   };
+   refreshAtWake();
   }catch(e){if(version===snoozeVersion)error=String(e)}
  }
- async function snooze(){if(!current)return;const id=current.id;try{await invoke('snooze_mail',{id,wake:Math.floor(Date.now()/1000)+86400});notice=t('Snoozed until tomorrow on this device');if(current?.id===id){current=null;conversation=[];openVersion++}void scheduleSnooze();void refreshUnread();await page()}catch(e){error=String(e)}}
+ function snoozeDeadline(preset:'hour'|'tomorrow'|'monday'){
+  const now=new Date();
+  if(preset==='hour')return Math.floor(now.getTime()/1000)+3600;
+  const days=preset==='tomorrow'?1:(8-now.getDay())%7||7;
+  now.setDate(now.getDate()+days);
+  now.setHours(9,0,0,0);
+  return Math.floor(now.getTime()/1000);
+ }
+ async function changeSnooze(wake:number|null){
+  if(!current||messageActionBusy)return;
+  const {id}=current, version=openVersion;
+  closeSnoozeMenu();
+  messageActionBusy=true;
+  try{
+   if(wake===null){
+    await invoke('unsnooze_mail',{id});
+    notice=t('Snooze ended.');
+   }else{
+    await invoke('snooze_mail',{id,wake});
+    notice=t('Snoozed on this device until {time}',{time:mailTime.format(wake*1000)});
+   }
+   const leavesView=wake===null?folder==='snoozed':folder!=='snoozed';
+   const hideCurrent=version===openVersion&&leavesView;
+   if(hideCurrent){current=null;conversation=[];openVersion++}
+   void scheduleSnooze();void refreshUnread();await page();
+   if(hideCurrent&&openVersion===version+1&&document.activeElement===document.body){
+    rowsElement?.querySelector<HTMLButtonElement>('.message:not(:disabled)')?.focus();
+   }
+  }catch(e){error=t(String(e))}
+  finally{messageActionBusy=false}
+ }
  let jobsTask:Promise<void>|undefined;
  let jobsPending=false,requestedOperationOffset=0;
  function refreshJobs(){
@@ -359,7 +492,7 @@
    await invoke(command,{id:job.id});
    await refreshJobs();
    if(command==='cancel_job'){void refreshUnread();await page();notice=t('Cancelled before submission')}
-  }catch(e){error=String(e)}
+  }catch(e){error=t(String(e))}
  }
  let accountSignatures=$state<Record<string,string>>({});
  let signatureValues=$state<Record<string,string>>({});
@@ -447,7 +580,7 @@
   try{
    if(operation==='discard'){
     await draftSave.catch(()=>{});
-    if(draftExists)await invoke('discard_live_draft',{id});
+    await invoke('discard_live_draft',{id});
     notice=t('Draft discarded.');
    }else{
     await persistDraft(draft);
@@ -470,12 +603,13 @@
    return;
   }
   composeVersion++;
-  settings=false;palette=false;consent=null;operations=false;operationsBusy=false;operationVersion++;
+  if(consent) cancelAi();
+  settings=false;palette=false;operations=false;operationsBusy=false;operationVersion++;
  }
  function resetSource(){
   composeVersion++;replyId=null;sourceId=null;composeMode='new';forwardChoices=[];forwardSelected=[];
   signature=accountSignatures[from]||'';showSignature=!!signature;
-  if(files.length){files=[];notice=t('Attachments cleared because the sending account changed')}
+  if(files.length){removeOutgoingFiles(files);notice=t('Attachments cleared because the sending account changed')}
  }
  function openComposer(id:string,draft:DraftData,attachments:File[],originalFiles:File[],saved:boolean){
   composeError='';
@@ -521,7 +655,30 @@
   }catch(e){error=String(e)}
   finally{composeBusy=false}
  }
- async function includeForwardFiles(){if(!sourceId||!forwardSelected.length||composeBusy)return;composeBusy=true;const version=composeVersion;const originalAccount=from;const originalSource=sourceId;try{const added=await invoke<File[]>('copy_forward_attachments',{messageId:originalSource,accountId:originalAccount,ids:forwardSelected});if(!compose||version!==composeVersion||from!==originalAccount||sourceId!==originalSource)return;files=[...files,...added];forwardChoices=forwardChoices.filter(f=>!forwardSelected.includes(f.id));forwardSelected=[]}catch(e){error=String(e)}finally{composeBusy=false}}
+ function releaseStaged(id:string,files:File[]){
+  if(!files.length)return;
+  void invoke('release_outgoing_attachments',{draftId:id,ids:files.map(file=>file.id)})
+   .catch(e=>error=String(e));
+ }
+ function removeOutgoingFiles(removed:File[]){
+  const id=draftId;
+  const ids=new Set(removed.map(file=>file.id));
+  files=files.filter(file=>!ids.has(file.id));
+  void draftSave.catch(()=>{}).then(()=>releaseStaged(id,removed));
+ }
+ async function includeForwardFiles(){
+  if(!sourceId||!forwardSelected.length||composeBusy)return;
+  composeBusy=true;
+  const version=composeVersion,id=draftId,accountId=from,messageId=sourceId,ids=[...forwardSelected];
+  try{
+   const added=await invoke<File[]>('copy_forward_attachments',{messageId,accountId,ids,draftId:id});
+   if(compose&&version===composeVersion&&from===accountId&&sourceId===messageId){
+    files=[...files,...added];
+    forwardChoices=forwardChoices.filter(file=>!ids.includes(file.id));forwardSelected=[];
+   }else releaseStaged(id,added);
+  }catch(e){if(version===composeVersion)error=String(e)}
+  finally{composeBusy=false}
+ }
  $effect(()=>{if(settings)invoke<Record<string,string>>('get_account_aliases').then(v=>aliasValues=v).catch(e=>error=String(e))});
  async function saveAliases(accountId:string){try{await invoke('save_account_aliases',{accountId,addresses:aliasValues[accountId]||''});notice=t('Your addresses are saved for Reply all exclusions')}catch(e){error=String(e)}}
  $effect(()=>{
@@ -531,11 +688,15 @@
   return()=>clearTimeout(draftTimer);
  });
  async function attach(){
-  const accountId=from,version=composeVersion;
+  if(composeBusy)return;
+  composeBusy=true;
+  const accountId=from,version=composeVersion,id=draftId;
   try{
-   const added=await invoke<File[]>('pick_attachments',{accountId});
+   const added=await invoke<File[]>('pick_attachments',{accountId,draftId:id});
    if(compose&&version===composeVersion&&from===accountId)files=[...files,...added];
-  }catch(e){error=String(e)}
+   else releaseStaged(id,added);
+  }catch(e){if(version===composeVersion)error=String(e)}
+  finally{composeBusy=false}
  }
  let pendingAttachment=$state.raw<{messageId:string;file:File}|null>(null);
  $effect(()=>{
@@ -553,11 +714,128 @@
    if(saved)notice=t('Attachment saved');
   }catch(e){error=String(e)}
  }
- async function ask(task='summary'){if(!current)return;aiTask=task;try{const info=await invoke<Info>('ai_info',{accountId:current.account_id});if(!info.configured){error=t('Configure a local or hosted model using RUSTYMAIL_LLM_BASE_URL and RUSTYMAIL_LLM_MODEL');return}if(info.hosted&&!info.consent){consent=info;consentAccount=current.account_id;return}await runAi(task)}catch(e){error=String(e)}}
- async function runAi(task:string){if(!current)return;aiBusy=true;const id=current.id;ai='';try{const text=await invoke<string>('run_ai',{id,task});if(current?.id===id)ai=text}catch(e){error=String(e)}finally{aiBusy=false}}
- async function approve(){try{await invoke('ai_consent',{accountId:consentAccount,allowed:true});consent=null;if(current?.account_id===consentAccount)await runAi(aiTask)}catch(e){error=String(e)}}
+ function sameAiSelection(selection:AiSelection){
+  return current?.id===selection.id&&current.account_id===selection.accountId&&openVersion===selection.version;
+ }
+ function validAi(selection:AiSelection){return aiSelection===selection&&sameAiSelection(selection)}
+ function cancelAi(){
+  const request=aiSelection;
+  aiSelection=null;
+  consent=null;
+  if(request&&dispatchedAi===request){
+   const active=activeAi;
+   const cancellation=invoke('cancel_ai',{requestId:request.requestId});
+   const settling=Promise.allSettled([active,cancellation]).then(()=>{
+    if(activeAi===settling){activeAi=null;aiBusy=false}
+   });
+   activeAi=settling;
+  }
+ }
+ $effect(()=>{if(aiSelection&&!sameAiSelection(aiSelection))cancelAi()});
+ function performAi(selection:AiSelection,operation:()=>Promise<void>){
+  aiBusy=true;
+  const active=operation().catch(e=>{if(validAi(selection))error=t(String(e))}).finally(()=>{
+   if(activeAi===active){activeAi=null;aiBusy=false}
+   if(aiSelection===selection&&!consent)aiSelection=null;
+  });
+  activeAi=active;
+ }
+ function ask(task='summary'){
+  if(!current?.loaded||activeAi||aiSelection)return;
+  const selection={id:current.id,accountId:current.account_id,task,version:openVersion,requestId:crypto.randomUUID()};
+  aiSelection=selection;
+  ai='';
+  performAi(selection,async()=>{
+   const info=await invoke<Info>('ai_info',{accountId:selection.accountId});
+   if(!validAi(selection))return;
+   if(!info.configured){
+    error=t('Configure a local or hosted model using RUSTYMAIL_LLM_BASE_URL and RUSTYMAIL_LLM_MODEL');
+   }else if(info.hosted&&!info.consent){
+    consent=info;
+   }else{
+    await runAi(selection,info.endpoint);
+   }
+  });
+ }
+ async function runAi(selection:AiSelection,expectedEndpoint:string){
+  if(!validAi(selection))return;
+  dispatchedAi=selection;
+  const {id,accountId,task,requestId}=selection;
+  try{
+   const text=await invoke<string>('run_ai',{id,accountId,task,requestId,expectedEndpoint});
+   if(validAi(selection))ai=text;
+  }finally{dispatchedAi=null}
+ }
+ function approve(){
+  const selection=aiSelection, info=consent;
+  if(!selection||!info||activeAi||!validAi(selection))return;
+  consent=null;
+  performAi(selection,async()=>{
+   await invoke('ai_consent',{accountId:selection.accountId,allowed:true,expectedEndpoint:info.endpoint});
+   if(validAi(selection))await runAi(selection,info.endpoint);
+  });
+ }
  async function revokeAi(){if(!current)return;try{await invoke('ai_consent',{accountId:current.account_id,allowed:false});notice=t('Hosted AI consent removed for this account and destination')}catch(e){error=String(e)}}
- function keyboard(e:KeyboardEvent){if(e.defaultPrevented||(e.target instanceof Element&&e.target.closest('dialog.security-confirmation')))return;if(e.key==='Escape'){if(compose||settings||palette||consent||operations){closeModal();return}if(navigationOpen){closeNavigation(true);return}if(bulkMenu?.open){bulkMenu.open=false;bulkMenu.querySelector('summary')?.focus();return}if(readerMenu?.open){readerMenu.open=false;readerMenu.querySelector('summary')?.focus();return}closeModal();focus=false;return}if((e.ctrlKey||e.metaKey)&&e.key==='k'&&!operations){e.preventDefault();palette=!palette;return}if(e.ctrlKey||e.metaKey||e.altKey||settings||compose||palette||consent||operations||(e.target instanceof Element&&e.target.closest('input,textarea,select')))return;if(e.key==='e')action('archive');if(e.key==='r')newDraft('reply');if(e.key==='c')newDraft();if(e.key==='j'||e.key==='k'){const i=messages.findIndex(m=>m.id===selectedId);const next=messages[i+(e.key==='j'?1:-1)];if(next)open(next)}}
+ let searchInput=$state<HTMLInputElement>();
+ async function focusSearch(){
+  if(folder==='drafts')navigate('inbox');
+  focus=false;
+  await tick();
+  searchInput?.focus();
+ }
+ function focusMessageRow(id:string){
+  if(!id)return false;
+  const row=rowsElement?.querySelector<HTMLButtonElement>(`[data-message-id="${CSS.escape(id)}"]:not(:disabled)`);
+  if(!row)return false;
+  row.focus({preventScroll:true});
+  row.scrollIntoView({block:'nearest',inline:'nearest'});
+  return true;
+ }
+ function closeDisclosure(details:HTMLDetailsElement){
+  details.open=false;
+  details.querySelector('summary')?.focus();
+ }
+ function keyboard(event:KeyboardEvent){
+  const target=event.target instanceof Element?event.target:null;
+  if(event.defaultPrevented||event.isComposing||target?.closest('dialog.security-confirmation'))return;
+  const modalOpen=compose||settings||!!consent||operations;
+  const disclosure=target?.closest<HTMLDetailsElement>('details[open]');
+  if(event.key==='Escape'){
+   if(modalOpen||palette){void closeModal();return}
+   if(navigationOpen){closeNavigation(true);return}
+   const menu=disclosure||[bulkMenu,snoozeMenu,readerMenu].find(details=>details?.open);
+   if(menu){closeDisclosure(menu);return}
+   if(target&&target===searchInput){
+    if(!(current&&focusMessageRow(selectedId))&&!focusMessageRow(messages[0]?.id??'')){
+     filtersMenu?.querySelector('summary')?.focus();
+    }
+    return;
+   }
+   focus=false;
+   return;
+  }
+  if((event.ctrlKey||event.metaKey)&&!event.altKey&&event.key.toLowerCase()==='k'){
+   if(!modalOpen&&!event.repeat){event.preventDefault();palette=!palette}
+   return;
+  }
+  if(event.ctrlKey||event.metaKey||event.altKey||modalOpen||palette||navigationOpen||disclosure||
+   target?.closest('input,textarea,select,[contenteditable]:not([contenteditable="false"])'))return;
+  if(event.key==='/'&&!event.repeat){event.preventDefault();void focusSearch();return}
+  if(event.key==='j'||event.key==='k'){
+   if(folder==='drafts'||queryPending||pageBusy||bulkBusy||filterError)return;
+   const index=current?messages.findIndex(message=>message.id===selectedId):-1;
+   const next=messages[index+(event.key==='j'?1:-1)];
+   if(next){
+    event.preventDefault();
+    void open(next);
+    focusMessageRow(next.id);
+   }
+  }else if(!event.repeat){
+   if(event.key==='e')void action('archive');
+   if(event.key==='r')void newDraft('reply');
+   if(event.key==='c')void newDraft();
+  }
+ }
  function modal(node:HTMLElement){
   const previous=compose?composerOpener:document.activeElement;
   const fields=()=>Array.from(node.querySelectorAll<HTMLElement>('button,input,textarea,select,summary,[tabindex]'))
@@ -615,9 +893,11 @@
    refreshMail();
    refreshJobs().catch(e=>error=String(e));
    void scheduleSnooze();
+   void refreshSyncStatuses();
   }
   void Promise.all([
    listen('mail-changed',refreshMail),
+   listen('sync-status-changed',refreshSyncStatuses),
    listen<boolean>('jobs-changed',event=>{
     refreshJobs().catch(e=>error=String(e));
     if(event.payload&&folder==='drafts')void page();
@@ -637,13 +917,14 @@
   return()=>{
    disposed=true;unlisteners.forEach(unlisten=>unlisten());window.removeEventListener('focus',reconcile);
    clearTimeout(mailTimer);clearTimeout(snoozeTimer);clearTimeout(queryTimer);
-   snoozeVersion++;queryVersion++;pendingPage=undefined;
+   snoozeVersion++;snoozeLookupVersion++;queryVersion++;syncStatusVersion++;pendingPage=undefined;
   };
  });
  let listScroll=0,rowsElement:HTMLElement|undefined;
  function restoreRows(node:HTMLElement){rowsElement=node;node.scrollTop=listScroll;return{destroy(){rowsElement=undefined}}}
  const readerDate=$derived(new Intl.DateTimeFormat(dateLocale(),{month:'short',day:'numeric',year:'numeric',hour:'2-digit',minute:'2-digit'}));
  const rowDate=$derived(new Intl.DateTimeFormat(dateLocale(),{month:'short',day:'numeric'}));
+ const mailTime=$derived(new Intl.DateTimeFormat(dateLocale(),{dateStyle:'medium',timeStyle:'short'}));
  function messageDate(raw:string){const d=new Date(raw);return Number.isNaN(d.getTime())?raw:readerDate.format(d)}
  function date(raw:string){const d=new Date(raw);return Number.isNaN(d.getTime())?raw:rowDate.format(d)}
 </script>
@@ -670,7 +951,24 @@
  </div></div><div class="sidebar-bottom"><button onclick={()=>settings=true}><Settings size={17}/>{t("Settings")}</button></div></aside>{/if}
  <main><header><div class="breadcrumb">{#if !focus}<button class="navigation-toggle" bind:this={navigationButton}
   aria-expanded={navigationOpen} aria-controls="mail-navigation" onclick={toggleNavigation}>{t("Mail navigation")}</button>{/if}
-  {#if focus}<strong>{mailboxTitle}</strong>{/if}</div><div class="header-actions"><span>{busy?t('Synchronizing…'):t('LIVE MAIL')}</span><button title={t("Sync accounts")} disabled={busy} onclick={refresh}><RefreshCw size={17}/></button><button aria-label={t("Mail operations")} title={t("Mail operations")} onclick={openOperations}><ListTodo size={17}/></button><button title={t("Commands")} onclick={()=>palette=true}><Command size={17}/></button><button title={t("Change theme")} onclick={()=>dark=!dark}><Sun size={18}/></button></div></header><div class="workspace">
+  {#if focus}<strong>{mailboxTitle}</strong>{/if}</div><div class="header-actions">{#if accounts.length}
+ <details class="sync-status">
+  <summary class:sync-error={syncNeedsAttention} aria-live="polite">{busy?t('Synchronizing…'):syncNeedsAttention?t('Sync needs attention'):t('Sync status')}</summary>
+  <ul class="option-panel" aria-label={t('Account sync status')}>
+   {#each accounts as item (item.id)}
+    {@const state=syncStatuses[item.id]}
+    <li>
+     <strong>{item.email}</strong>
+     {#if syncingAccount===item.id}<span>{t('Synchronizing…')}</span>{/if}
+     {#if state?.last_success!=null}
+      <span>{t('Last successful sync')} · <time datetime={new Date(state.last_success*1000).toISOString()}>{mailTime.format(state.last_success*1000)}</time></span>
+     {:else}<span>{t('No successful sync recorded')}</span>{/if}
+     {#if state?.error}<span class="sync-error">{t(state.error)}</span>{/if}
+    </li>
+   {/each}
+  </ul>
+ </details>
+ {/if}<button title={t("Sync accounts")} disabled={busy} onclick={refresh}><RefreshCw size={17}/></button><button aria-label={t("Mail operations")} title={t("Mail operations")} onclick={openOperations}><ListTodo size={17}/></button><button title={t("Commands")} onclick={()=>palette=true}><Command size={17}/></button><button title={t("Change theme")} onclick={()=>dark=!dark}><Sun size={18}/></button></div></header><div class="workspace">
  {#if !focus&&folder==='drafts'}
   <section class="message-list" aria-label={t("Drafts")}>
    <div class="list-heading"><div><h1>{t("Drafts")}</h1><p>{t("Saved on this device")}</p></div></div>
@@ -698,8 +996,8 @@
  {:else if !focus}
   <section class="message-list">
    <div class="list-heading"><div><h1>{mailboxTitle}</h1></div></div>
-   <label class="search"><Search size={16}/><input aria-label={t("Search downloaded mail")} value={search} oninput={e=>{search=e.currentTarget.value;changeScope(true)}} placeholder={t("Search downloaded mail")}/></label>
-   <details class="mail-filters">
+   <label class="search"><Search size={16}/><input bind:this={searchInput} aria-label={t("Search downloaded mail")} aria-keyshortcuts="/" value={search} oninput={e=>{search=e.currentTarget.value;changeScope(true)}} placeholder={t("Search downloaded mail")}/><kbd aria-hidden="true">/</kbd></label>
+   <details class="mail-filters" bind:this={filtersMenu}>
     <summary>{t("Filters")}{filterSummary.length?` (${filterSummary.length})`:''}</summary>
     <div class="filter-fields">
      <label class="unread-filter"><input type="checkbox" checked={unreadOnly} onchange={e=>{unreadOnly=e.currentTarget.checked;changeScope()}}/>{t("Unread only")}</label>
@@ -711,9 +1009,12 @@
     </div>
    </details>
    {#if filterSummary.length}
-    <div class="filter-summary" aria-label={t("Active filters")}>
-     {#each filterSummary as filter}<span>{filter}</span>{/each}
-     <button onclick={clearFilters}>{t("Clear filters")}</button>
+    <div class="filter-summary" role="group" aria-label={t("Active filters")} bind:this={filterChips}>
+     {#each filterSummary as filter (filter.key)}
+      <button class="filter-chip" data-filter={filter.key} aria-label={t('Remove filter: {filter}',{filter:filter.label})}
+       title={filter.label} onclick={event=>removeFilter(filter.key,event)}><span>{filter.label}</span><X size={12} aria-hidden="true"/></button>
+     {/each}
+     <button onclick={async()=>{clearFilters();await tick();filtersMenu?.querySelector('summary')?.focus()}}>{t("Clear filters")}</button>
     </div>
    {/if}
    {#if filterError}<p class="filter-error" role="alert">{filterError}</p>{/if}
@@ -728,7 +1029,7 @@
       <button class="clear-selection" onclick={clearSelection}>{t("Clear selection")}</button>
       <details class="bulk-menu" bind:this={bulkMenu}>
        <summary>{t("Selected actions")}</summary>
-       <div class="bulk-actions" aria-label={t("Bulk actions")}>
+       <div class="bulk-actions option-panel option-list" aria-label={t("Bulk actions")}>
         {#each bulkActions as item}
          <button disabled={pageBusy||queryPending||bulkBusy||!!filterError} onclick={()=>bulkAction(item.action)}>{t(item.label)}</button>
         {/each}
@@ -742,7 +1043,7 @@
      <div class="triage-row">
       <input type="checkbox" aria-label={t('Select {subject}',{subject:m.subject||t('message')})} checked={checkedRows.includes(m.id)}
        disabled={pageBusy||queryPending||bulkBusy||!!filterError} onchange={e=>toggleRow(m.id,e.currentTarget.checked)}/>
-      <button class="message" class:selected={!!current&&sameConversation(m,current)} class:unread-row={m.unread} disabled={queryPending||!!filterError} onclick={()=>open(m)}><div class="row-top"><strong>{m.sender||m.address}</strong><time>{date(m.date)}</time></div><div class="row-subject">{#if m.unread}<span class="unread" aria-hidden="true"></span><span class="visually-hidden">{t("Unread.")} </span>{/if}{m.subject}{#if m.conversation_count>1}<small class="thread-count" aria-label={t('{count} messages',{count:m.conversation_count})}>{m.conversation_count}</small>{/if}</div><p>{m.body||t('Open to download message')}</p>{#if (!account&&accounts.length>1)||m.starred}<div class="row-footer">{#if !account&&accounts.length>1}<span>{m.account}</span>{/if}{#if m.starred}<Star size={13}/>{/if}</div>{/if}</button>
+      <button class="message" data-message-id={m.id} class:selected={!!current&&sameConversation(m,current)} class:unread-row={m.unread} disabled={queryPending||!!filterError} onclick={()=>open(m)}><div class="row-top"><strong>{m.sender||m.address}</strong><time>{date(m.date)}</time></div><div class="row-subject">{#if m.unread}<span class="unread" aria-hidden="true"></span><span class="visually-hidden">{t("Unread.")} </span>{/if}{m.subject}{#if m.conversation_count>1}<small class="thread-count" aria-label={t('{count} messages',{count:m.conversation_count})}>{m.conversation_count}</small>{/if}</div><p>{m.body||t('Open to download message')}</p>{#if (!account&&accounts.length>1)||m.starred}<div class="row-footer">{#if !account&&accounts.length>1}<span>{m.account}</span>{/if}{#if m.starred}<Star size={13}/>{/if}</div>{/if}</button>
      </div>
     {/each}
     {#if !messages.length&&!pageBusy&&!queryPending&&!filterError}
@@ -764,13 +1065,25 @@
  <section class="reader">{#if current}<div class="reader-toolbar" aria-label={t("Actions for selected message")}>
   <div>
    <button title={t("Archive")} disabled={messageActionBusy} onclick={()=>action('archive')}><Archive size={18}/></button>
-   <button title={t("Snooze until tomorrow")} onclick={snooze}><Clock size={18}/></button>
+   <details class="snooze-menu" bind:this={snoozeMenu} ontoggle={refreshSelectedSnooze}>
+    <summary title={t('Snooze')}><Clock size={18}/><span class="visually-hidden">{t('Snooze')}</span></summary>
+    <div class="reader-menu-items option-panel option-list">
+     {#if selectedWake!==null}
+      <span class="snooze-deadline">{t('Snoozed until {time}',{time:mailTime.format(selectedWake*1000)})}</span>
+      <button disabled={messageActionBusy} onclick={()=>changeSnooze(null)}>{t('End snooze')}</button>
+     {/if}
+     <button disabled={messageActionBusy} onclick={()=>changeSnooze(snoozeDeadline('hour'))}>{t('In one hour')}</button>
+     <button disabled={messageActionBusy} onclick={()=>changeSnooze(snoozeDeadline('tomorrow'))}>{t('Tomorrow at 9 AM')}</button>
+     <button disabled={messageActionBusy} onclick={()=>changeSnooze(snoozeDeadline('monday'))}>{t('Next Monday at 9 AM')}</button>
+    </div>
+   </details>
    <button title={t("Trash")} disabled={messageActionBusy} onclick={()=>action('trash')}><Trash2 size={18}/></button>
    <button title={t("Toggle star")} disabled={messageActionBusy} onclick={()=>action(current?.starred?'unstar':'star')}><Star size={18} fill={current.starred?'currentColor':'none'}/></button>
-   <details class="reader-menu" bind:this={readerMenu}>
+   <details class="reader-menu" bind:this={readerMenu} ontoggle={()=>{if(readerMenu?.open&&snoozeMenu)snoozeMenu.open=false}}>
     <summary>{t("More actions")}</summary>
-    <div class="reader-menu-items">
+    <div class="reader-menu-items option-panel option-list">
      <button disabled={!current.loaded||current.unread||messageActionBusy} onclick={()=>action('unread')}>{t("Mark unread")}</button>
+     {#if readerSender}<button onclick={filterBySender}>{t("Filter by this sender")}</button>{/if}
      {#if current.folder!=='inbox'}<button disabled={messageActionBusy} onclick={()=>action('inbox')}>{t("Move to Inbox")}</button>{/if}
      {#if current.folder!=='spam'}<button disabled={messageActionBusy} onclick={()=>action('spam')}>{t("Report spam")}</button>{/if}
      {#if readerMailboxes.length}
@@ -796,10 +1109,11 @@
    </details>
   </div>
   <button class="focus-button" onclick={()=>focus=!focus}>{focus?t('Exit focus'):t('Focus mode')}</button>
- </div><article><div class="reader-eyebrow">{current.account} / {folderName(current.folder)}</div><h2>{conversation.at(-1)?.subject||current.subject||t('(No subject)')}</h2><p class="conversation-meta">{t(conversation.length===1?'{count} cached message · Oldest first':'{count} cached messages · Oldest first',{count:conversation.length})}{#if current.conversation_key?.startsWith('subject:')} {t("· Grouped by subject")}{/if}</p>{#each conversation as member (member.id)}{#if member.id!==current.id}<button class="conversation-message" onclick={()=>expand(member)} aria-expanded="false"><span><strong>{member.sender||member.address||t('Unknown sender')}</strong>{#if member.unread}<span class="unread"></span>{/if}<small>{member.body||member.subject}</small></span><time datetime={member.date} title={messageDate(member.date)}>{messageDate(member.date)}</time></button>{:else}<section class="conversation-expanded" aria-label={t("Selected message")}><div class="sender"><div class="sender-avatar">{current.sender.slice(0,2).toUpperCase()}</div><div><strong>{current.sender}</strong><span>&lt;{current.address}&gt;</span></div><time datetime={current.date}>{messageDate(current.date)}<small>{folderName(current.folder)} {t("· Selected message")}</small></time></div>{#if current.to?.length||current.cc?.length||current.reply_to?.length}<details class="recipient-details"><summary>{t("Recipients")}</summary>{#if current.to?.length}<p>{t("To:")} {current.to.join(', ')}</p>{/if}{#if current.cc?.length}<p>{t("Cc:")} {current.cc.join(', ')}</p>{/if}{#if current.reply_to?.length}<p>{t("Reply to:")} {current.reply_to.join(', ')}</p>{/if}</details>{/if}{#if current.loaded&&current.html_body}{#key current.id}<MailBody id={current.id} html={current.html_body} text={current.body}/>{/key}{:else}<div class="body">{current.loaded?current.body:loadError||t('Downloading message…')}{#if loadError}<button class="ai-button" onclick={()=>current&&expand(current)}>{t("Try again")}</button>{/if}</div>{/if}{#if current.attachments.length}<div class="attachment-list">{#each current.attachments as f}<button onclick={()=>requestAttachment(f)}><Paperclip size={14}/>{f.name}<small>{Math.ceil(f.size/1024)} {t("KB · Save")}</small></button>{/each}</div>{/if}{#if ai}<div class="ai-result"><span><Sparkles size={15}/>{t("AI suggestion · verify with the source")}</span><p>{ai}</p></div>{/if}<div class="reply-actions"><button class="reply" disabled={!current.loaded||composeBusy} onclick={()=>newDraft('reply')}><ArrowLeft size={16}/>{t("Reply")}</button><button class="ai-button" disabled={!current.loaded||composeBusy} onclick={()=>newDraft('reply_all')}>{t("Reply all")}</button><button class="ai-button" disabled={!current.loaded||composeBusy} onclick={()=>newDraft('forward')}>{t("Forward")}</button><details class="reader-ai"><summary>{t("AI tools")}</summary><div><button class="ai-button" disabled={!current.loaded||aiBusy} onclick={()=>ask('summary')}><Sparkles size={15}/>{t("Summarize")}</button><button class="ai-button" disabled={!current.loaded||aiBusy} onclick={()=>ask('actions')}>{t("Actions")}</button><button class="ai-button" disabled={!current.loaded||aiBusy} onclick={()=>ask('reply')}>{t("Suggest reply")}</button>{#if aiBusy}<button onclick={()=>invoke('cancel_ai')}>{t("Cancel AI")}</button>{/if}</div></details></div></section>{/if}{/each}{#if current.headers_shortened}<p class="privacy-note">{t("Some headers were too long and have been shortened.")}</p>{/if}</article><footer><span><kbd>J</kbd><kbd>K</kbd>{t("navigate")}</span><span><kbd>E</kbd>{t("archive")}</span><span><kbd>R</kbd>{t("reply")}</span></footer>{:else}<div class="empty reader-empty"><Mail size={36}/><h2>{t("Select a conversation")}</h2>{#if status}<p>{status}</p>{/if}</div>{/if}</section></div></main>
+ </div><article><div class="reader-eyebrow">{current.account} / {folderName(current.folder)}</div><h2>{conversation.at(-1)?.subject||current.subject||t('(No subject)')}</h2><p class="conversation-meta">{t(conversation.length===1?'{count} cached message · Oldest first':'{count} cached messages · Oldest first',{count:conversation.length})}{#if current.conversation_key?.startsWith('subject:')} {t("· Grouped by subject")}{/if}</p>{#each conversation as member (member.id)}{#if member.id!==current.id}<button class="conversation-message" onclick={()=>expand(member)} aria-expanded="false"><span><strong>{member.sender||member.address||t('Unknown sender')}</strong>{#if member.unread}<span class="unread"></span>{/if}<small>{member.body||member.subject}</small></span><time datetime={member.date} title={messageDate(member.date)}>{messageDate(member.date)}</time></button>{:else}<section class="conversation-expanded" aria-label={t("Selected message")}><div class="sender"><div class="sender-avatar">{current.sender.slice(0,2).toUpperCase()}</div><div><strong>{current.sender}</strong><span>&lt;{current.address}&gt;</span></div><time datetime={current.date}>{messageDate(current.date)}<small>{folderName(current.folder)} {t("· Selected message")}</small></time></div>{#if current.to?.length||current.cc?.length||current.reply_to?.length}<details class="recipient-details"><summary>{t("Recipients")}</summary>{#if current.to?.length}<p>{t("To:")} {current.to.join(', ')}</p>{/if}{#if current.cc?.length}<p>{t("Cc:")} {current.cc.join(', ')}</p>{/if}{#if current.reply_to?.length}<p>{t("Reply to:")} {current.reply_to.join(', ')}</p>{/if}</details>{/if}{#if current.loaded&&current.html_body}{#key current.id}<MailBody id={current.id} html={current.html_body} text={current.body}/>{/key}{:else}<div class="body">{current.loaded?current.body:loadError||t('Downloading message…')}{#if loadError}<button class="ai-button" onclick={()=>current&&expand(current)}>{t("Try again")}</button>{/if}</div>{/if}{#if current.attachments.length}<div class="attachment-list">{#each current.attachments as f}<button onclick={()=>requestAttachment(f)}><Paperclip size={14}/>{f.name}<small>{Math.ceil(f.size/1024)} {t("KB · Save")}</small></button>{/each}</div>{/if}{#if ai}<div class="ai-result"><span><Sparkles size={15}/>{t("AI suggestion · verify with the source")}</span><p>{ai}</p></div>{/if}<div class="reply-actions"><button class="reply" disabled={!current.loaded||composeBusy} onclick={()=>newDraft('reply')}><ArrowLeft size={16}/>{t("Reply")}</button><button class="ai-button" disabled={!current.loaded||composeBusy} onclick={()=>newDraft('reply_all')}>{t("Reply all")}</button><button class="ai-button" disabled={!current.loaded||composeBusy} onclick={()=>newDraft('forward')}>{t("Forward")}</button><details class="reader-ai"><summary>{t("AI tools")}</summary><div class="option-panel option-list"><button class="ai-button" disabled={!current.loaded||aiBusy} onclick={()=>ask('summary')}><Sparkles size={15}/>{t("Summarize")}</button><button class="ai-button" disabled={!current.loaded||aiBusy} onclick={()=>ask('actions')}>{t("Actions")}</button><button class="ai-button" disabled={!current.loaded||aiBusy} onclick={()=>ask('reply')}>{t("Suggest reply")}</button>{#if aiBusy}<button onclick={cancelAi}>{t("Cancel AI")}</button>{/if}</div></details></div></section>{/if}{/each}{#if current.headers_shortened}<p class="privacy-note">{t("Some headers were too long and have been shortened.")}</p>{/if}</article><footer><span><kbd>J</kbd><kbd>K</kbd>{t("navigate")}</span><span><kbd>E</kbd>{t("archive")}</span><span><kbd>R</kbd>{t("reply")}</span></footer>{:else}<div class="empty reader-empty"><Mail size={36}/><h2>{t("Select a conversation")}</h2></div>{/if}</section></div></main>
  {#snippet jobActions(job:Job)}
   {#if job.status==='pending'}<button onclick={()=>manageJob(job,'cancel_job')}>{t("Cancel")}</button>{/if}
   {#if job.status==='uncertain'&&job.kind==='send'}<button onclick={()=>manageJob(job,'resolve_send')}>{t("I checked Sent · dismiss")}</button>{/if}
+  {#if job.status==='uncertain'&&job.kind==='mutation'}<button onclick={()=>manageJob(job,'review_mutation')}>{t("Sync and dismiss")}</button>{/if}
   {#if job.status==='failed'&&job.kind==='mutation'}<button onclick={()=>manageJob(job,'retry_mutation')}>{t("Retry")}</button>{/if}
  {/snippet}
  {#if jobs.some(activeStatus)}
@@ -815,7 +1129,7 @@
    action={t("Save attachment")} oncancel={()=>pendingAttachment=null} onconfirm={confirmAttachment}/>
  {/if}
  {#if notice}<div class="toast" role="status">{notice}<button aria-label={t("Dismiss")} onclick={()=>notice=''}><X size={15}/></button></div>{/if}{#if error}<div class="toast error" role="alert">{error}<button aria-label={t("Dismiss error")} onclick={()=>error=''}><X size={15}/></button></div>{/if}
- {#if settings||compose||palette||consent||operations}<div class="overlay" role="presentation"><div class="modal" class:compose-dialog={compose} use:modal role="dialog" aria-modal="true" aria-label={operations?t('Mail operations'):consent?t('Hosted AI consent'):compose?t('Compose'):settings?t('Settings'):t('Commands')} tabindex="-1"><div class="modal-header"><h2>{operations?t('Mail operations'):consent?t('Share this message with your model?'):compose?(composeMode==='forward'?t('Forward message'):composeMode==='reply_all'?t('Reply all'):composeMode==='reply'?t('Reply'):t('A new conversation')):settings?t('Your preferences'):t('Commands')}</h2><button aria-label={t("Close")} disabled={draftFinishing} onclick={closeModal}><X size={20}/></button></div>
+ {#if settings||compose||palette||consent||operations}<div class="overlay" role="presentation"><div class="modal dialog-surface" class:settings-dialog={settings} class:compose-dialog={compose} use:modal role="dialog" aria-modal="true" aria-label={operations?t('Mail operations'):consent?t('Hosted AI consent'):compose?t('Compose'):settings?t('Settings'):t('Commands')} tabindex="-1"><div class="modal-header"><h2>{operations?t('Mail operations'):consent?t('Share this message with your model?'):compose?(composeMode==='forward'?t('Forward message'):composeMode==='reply_all'?t('Reply all'):composeMode==='reply'?t('Reply'):t('A new conversation')):settings?t('Your preferences'):t('Commands')}</h2><button aria-label={t("Close")} disabled={draftFinishing} onclick={closeModal}><X size={20}/></button></div>
  {#if operations}
   <div class="operations-list" aria-busy={operationsBusy}>
    {#each activePage.jobs as job (job.id)}
@@ -838,7 +1152,7 @@
  {:else if compose}
   <div class="compose-scroll">
   <fieldset class="compose-fields" disabled={draftFinishing}>
-   <label>{t("From")}<select bind:value={from} onchange={resetSource}>{#each accounts as a}<option value={a.id}>{a.email}</option>{/each}</select></label><div data-recipient="to"><RecipientField label={t("To (comma-separated)")} bind:value={to} recent={recentRecipients}/></div>
+   <label>{t("From")}<select class="option-select" bind:value={from} onchange={resetSource}>{#each accounts as a}<option value={a.id}>{a.email}</option>{/each}</select></label><div data-recipient="to"><RecipientField label={t("To (comma-separated)")} bind:value={to} recent={recentRecipients}/></div>
    {#if !showCc||!showBcc}
     <div class="recipient-controls">
      {#if !showCc}<button type="button" onclick={()=>revealRecipient('cc')}>{t("Add Cc")}</button>{/if}
@@ -854,7 +1168,7 @@
    {:else if accountSignatures[from]}
     <button type="button" onclick={()=>{signature=accountSignatures[from];showSignature=true}}>{t("Insert signature")}</button>
    {/if}
-   <div class="attachment-list">{#each files as f}<button onclick={()=>files=files.filter(x=>x.id!==f.id)}>{f.name}<X size={12}/></button>{/each}</div>{#if forwardChoices.length}<fieldset class="forward-attachments"><legend>{t("Original attachments")}</legend><p>{t("Choose which attachments to include. None are added automatically.")}</p>{#each forwardChoices as f}<label><input type="checkbox" value={f.id} bind:group={forwardSelected}/>{f.name} · {Math.ceil(f.size/1024)} KB</label>{/each}<button disabled={composeBusy||!forwardSelected.length} onclick={includeForwardFiles}>{t("Include selected attachments")}</button></fieldset>{/if}
+   <div class="attachment-list">{#each files as f}<button onclick={()=>removeOutgoingFiles([f])}>{f.name}<X size={12}/></button>{/each}</div>{#if forwardChoices.length}<fieldset class="forward-attachments"><legend>{t("Original attachments")}</legend><p>{t("Choose which attachments to include. None are added automatically.")}</p>{#each forwardChoices as f}<label><input type="checkbox" value={f.id} bind:group={forwardSelected}/>{f.name} · {Math.ceil(f.size/1024)} KB</label>{/each}<button disabled={composeBusy||!forwardSelected.length} onclick={includeForwardFiles}>{t("Include selected attachments")}</button></fieldset>{/if}
   </fieldset>
   </div>
   <div class="compose-footer">
@@ -875,10 +1189,10 @@
    <p class="send-delay">{t("Sending starts in 10 seconds. You can cancel during that time.")}</p>
   {/if}
   </div>
- {:else if settings}<LanguagePicker/>{#each accounts as a}<label>{t('Your other addresses for {email}',{email:a.email})}<input aria-label={t('Aliases for {email}',{email:a.email})} bind:value={aliasValues[a.id]} placeholder="alias@example.com, other@example.com"/><small>{t("Excluded from Reply all. This does not enable sending as an alias.")}</small></label><button onclick={()=>saveAliases(a.id)}>{t("Save addresses")}</button>
+ {:else if settings}<div class="settings-scroll"><div class="settings-group"><LanguagePicker/><label>{t("Reading size:")} {fontSize}px<input type="range" min="14" max="22" bind:value={fontSize}/></label><label>{t("Reading width")}<input type="range" min="580" max="1000" step="20" bind:value={lineWidth}/></label><button class="setting-row" aria-pressed={compact} onclick={()=>compact=!compact}>{t("Compact list")}<span>{compact?t('On'):t('Off')}</span></button></div>{#each accounts as a}<div class="settings-group"><label>{t('Your other addresses for {email}',{email:a.email})}<input aria-label={t('Aliases for {email}',{email:a.email})} bind:value={aliasValues[a.id]} placeholder="alias@example.com, other@example.com"/><small>{t("Excluded from Reply all. This does not enable sending as an alias.")}</small></label><button class="secondary-button" onclick={()=>saveAliases(a.id)}>{t("Save addresses")}</button>
  <label>{t('Signature for {email}',{email:a.email})}<textarea aria-label={t('Signature for {email}',{email:a.email})} rows="3" maxlength="4096" bind:value={signatureValues[a.id]}></textarea></label>
- <button disabled={signatureSaving} onclick={()=>saveSignature(a.id)}>{t("Save signature")}</button>
- {/each}<label>{t("Reading size:")} {fontSize}px<input type="range" min="14" max="22" bind:value={fontSize}/></label><label>{t("Reading width")}<input type="range" min="580" max="1000" step="20" bind:value={lineWidth}/></label><button class="setting-row" onclick={()=>compact=!compact}>{t("Compact list")}<span>{compact?t('On'):t('Off')}</span></button>{#if current}<button class="setting-row" onclick={revokeAi}>{t("Revoke hosted-AI consent for selected account")}</button>{/if}{#if notificationPreferences}
+ <button class="secondary-button" disabled={signatureSaving} onclick={()=>saveSignature(a.id)}>{t("Save signature")}</button>
+ </div>{/each}{#if current}<button class="setting-row" onclick={revokeAi}>{t("Revoke hosted-AI consent for selected account")}</button>{/if}{#if notificationPreferences}
  <fieldset class="notification-settings">
   <legend>{t("Windows mail notifications")}</legend>
   <label><input type="checkbox" checked={notificationPreferences.enabled} disabled={notificationSaving}
@@ -895,16 +1209,25 @@
    }}/>{t("Show sender and subject in notifications")}</label>
   <p>{t("Notifications appear while Rusty Mail is running. Click a banner to open its message.")}</p>
  </fieldset>
- {/if}<p>{t("Account authorization and mail credentials stay in the OS credential store. Mail and cached files are encrypted locally.")}</p><div class="update-controls"><button class="setting-row" disabled={updateBusy} onclick={async()=>{updateBusy=true;try{updateOffer=await invoke("check_updates");notice=updateOffer?.enabled?(updateOffer.version?t("Signed update available"):t("No update available")):t("Development build: signed update channel is not configured")}catch(e){error=String(e)}finally{updateBusy=false}}}>{t("Check for signed updates")}</button>{#if updateOffer?.version}<p>{t("Version")} {updateOffer.version}{t(". Installation closes Rusty Mail. Save and close the composer first.")}</p><button disabled={updateBusy} onclick={async()=>{updateBusy=true;try{await invoke("install_update",{version:updateOffer?.version})}catch(e){error=String(e)}finally{updateBusy=false}}}>{t("Download, verify and install")}</button>{/if}</div><AccountSetup onchange={()=>refreshAccounts().catch(e=>error=String(e))}/>
+ {/if}<p>{t("Account authorization and mail credentials stay in the OS credential store. Mail and cached files are encrypted locally.")}</p><div class="update-controls"><button class="setting-row" disabled={updateBusy} onclick={async()=>{updateBusy=true;try{updateOffer=await invoke("check_updates");notice=updateOffer?.enabled?(updateOffer.version?t("Signed update available"):t("No update available")):t("Development build: signed update channel is not configured")}catch(e){error=String(e)}finally{updateBusy=false}}}>{t("Check for signed updates")}</button>{#if updateOffer?.version}<p>{t("Version")} {updateOffer.version}{t(". Installation closes Rusty Mail. Save and close the composer first.")}</p><button disabled={updateBusy} onclick={async()=>{updateBusy=true;try{await invoke("install_update",{version:updateOffer?.version})}catch(e){error=String(e)}finally{updateBusy=false}}}>{t("Download, verify and install")}</button>{/if}</div><AccountSetup onchange={()=>refreshAccounts().catch(e=>error=String(e))}/></div>
  {:else}{#each [t('Compose'),t('Synchronize accounts'),t('Focus mode'),t('Settings'),t('Inbox')] as cmd,i}<button class="command-row" onclick={()=>{palette=false;if(i===0)newDraft();if(i===1)refresh();if(i===2)focus=!focus;if(i===3)settings=true;if(i===4)navigate('inbox')}}>{cmd}<ChevronRight size={16}/></button>{/each}{/if}
  </div></div>{/if}
 </div>
 <style>
+ header{position:relative}
+ .sync-status{flex-shrink:0}
+ .sync-status summary{cursor:pointer;padding:8px;border-radius:7px}
+ .sync-status summary:hover,.sync-status[open] summary{background:var(--ui-selection)}
+ .sync-status summary:focus-visible{outline:2px solid var(--mail-secondary);outline-offset:2px}
+ .sync-status ul{position:absolute;z-index:7;top:calc(100% - 10px);right:16px;width:min(320px,75vw);max-height:55vh;
+  overflow:auto;list-style:none;margin:4px 0 0;padding:0 12px}
+ .sync-status li{display:grid;gap:4px;padding:10px 0;overflow-wrap:anywhere}
+ .sync-status li+li{border-top:1px solid var(--mail-border,#e4e9dc)}
+ .sync-error{color:#8a382e;font-weight:600}
+ .app.dark .sync-error{color:#ffb9ad}
  .app {
-  --mail-secondary:#52634a;--mail-border:#b6c1ad;--mail-panel:#fffefa;--mail-focus:#446a36;
- }
- .app.dark {
-  --mail-secondary:#b8c6af;--mail-border:#6f7d66;--mail-panel:#22291f;--mail-focus:#a4c58e;
+  --mail-secondary:var(--ui-secondary);--mail-border:var(--ui-border);
+  --mail-panel:var(--ui-panel);--mail-focus:var(--ui-focus);
  }
  .app :is(button,summary,input,textarea,select):focus-visible{outline:2px solid var(--mail-focus);outline-offset:2px}
  header{height:52px;padding:0 20px}
@@ -923,6 +1246,7 @@
  .list-heading{padding:15px 18px 10px}
  .list-heading h1{font-size:22px}
  .message-list .search{margin-inline:16px}
+ .search kbd{color:var(--mail-secondary);border-color:var(--mail-border)}
  .message-list .list-meta{padding:8px 16px 0;color:var(--mail-secondary)}
  .list-bottom{padding:8px 16px;color:var(--mail-secondary)}
  .mail-filters,.filter-summary,.filter-error{margin-inline:16px}
@@ -933,9 +1257,7 @@
  .clear-selection:hover,.bulk-menu summary:hover,.reader-ai summary:hover{text-decoration:underline}
  .bulk-menu,.reader-ai{position:relative}
  .bulk-menu .bulk-actions,.reader-ai>div{position:absolute;right:0;top:calc(100% + 4px);z-index:4;
-  display:grid;gap:2px;min-width:max-content;background:var(--mail-panel);color:var(--mail-secondary);
-  padding:4px;border:1px solid var(--mail-border);border-radius:6px;box-shadow:0 4px 12px #0002}
- .bulk-actions button,.reader-ai button{justify-content:flex-start;border:0;padding:7px 9px}
+  display:grid;gap:2px;min-width:max-content}
  .triage-row .message{padding:8px 14px 8px 8px}
  .triage-row .row-top time{white-space:nowrap;color:var(--mail-secondary)}
  .triage-row .row-top strong{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
@@ -949,9 +1271,16 @@
  .reader-ai summary{padding:8px;white-space:nowrap;font-size:12px}
  .reader-ai>div{top:auto;bottom:calc(100% + 4px)}
  .reply-actions{gap:8px}
- .modal.compose-dialog{display:flex;flex-direction:column;overflow:hidden;padding:0;width:620px;max-height:calc(100dvh - 32px)}
- .compose-dialog .modal-header{flex:none;margin:0;padding:14px 20px;border-bottom:1px solid var(--mail-border)}
+ .modal:is(.compose-dialog,.settings-dialog){display:flex;flex-direction:column;overflow:hidden;padding:0;max-height:calc(100dvh - 32px)}
+ .modal.compose-dialog{width:620px}
+ :is(.compose-dialog,.settings-dialog) .modal-header{flex:none;margin:0;padding:14px 20px;border-bottom:1px solid var(--mail-border)}
  .compose-scroll{min-height:0;overflow:auto;padding:2px 20px 10px}
+ .settings-scroll{min-height:0;overflow:auto;padding:16px 20px 20px}
+ .settings-group,.notification-settings{
+  min-width:0;margin:0 0 14px;padding:12px;border:1px solid var(--mail-border);border-radius:var(--ui-radius)}
+ .settings-group :global(label:not(.search)){font-size:12px;margin:0 0 10px}
+ .settings-group > .secondary-button + label{margin-top:14px}
+ .settings-group .setting-row{padding:8px 0}
  .compose-dialog .compose-fields :global(label:not(.search)){font-size:12px;color:var(--mail-secondary);margin:8px 0}
  .compose-dialog .compose-fields :global(input:not([type=checkbox])),
  .compose-dialog .compose-fields :global(select),
@@ -984,22 +1313,30 @@
  }
 
  .inbox-unread{margin-left:auto;flex-shrink:0;font-size:11px;font-variant-numeric:tabular-nums}
- .notification-settings{margin:12px 0;border:1px solid #87927755;border-radius:7px}
- .notification-settings legend{font-size:12px}
+ .notification-settings legend{padding-inline:5px;font-size:12px;font-weight:600}
  .notification-settings label:not(.search){display:flex;align-items:center;gap:8px;color:inherit}
  .notification-settings input[type=checkbox]{display:inline;width:auto;margin:0;padding:0}
  .compose-fields{border:0;padding:0;margin:0;min-width:0}
  .draft-row .row-top strong{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
  .mail-filters,.triage-controls,.filter-summary,.filter-error{margin:8px 24px 0;font-size:11px}
  summary{cursor:pointer}
- .filter-fields{display:grid;gap:8px;padding:8px 0}
+ .mail-filters summary{padding:6px 8px;border-radius:7px;color:var(--mail-secondary);font-size:12px}
+ .mail-filters summary:hover,.mail-filters[open] summary{background:var(--ui-selection)}
+ .filter-fields{
+  display:grid;gap:8px;margin-top:4px;padding:8px;
+  border:1px solid var(--mail-border);border-radius:var(--ui-radius);font-size:12px}
  .filter-fields label{display:grid;gap:4px;min-width:0}
  .filter-fields .unread-filter,.triage-controls label{display:flex;align-items:center;gap:5px}
- .filter-fields input:not([type=checkbox]){background:inherit;color:inherit;border:1px solid #87927777;border-radius:5px;padding:5px;width:100%;min-width:0}
+ .filter-fields input:not([type=checkbox]){
+  background:var(--ui-control);color:var(--ui-text);border:1px solid var(--mail-border);
+  border-radius:7px;padding:5px 6px;width:100%;min-width:0;min-height:30px}
  .filter-dates{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:8px}
  .filter-summary,.bulk-actions{display:flex;align-items:center;gap:5px;flex-wrap:wrap;overflow-wrap:anywhere}
- .filter-summary span{background:#87927722;border-radius:5px;padding:3px 6px}
- .filter-summary button,.bulk-actions button,.operation-row button{border:1px solid #87927777;padding:4px 7px}
+ .filter-summary button,.operation-row button{border:1px solid var(--mail-border);padding:4px 7px}
+ .filter-summary .filter-chip{min-height:26px;max-width:100%;gap:5px;background:var(--ui-selection);text-align:start}
+ .filter-chip span{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+ .filter-summary .filter-chip :global(svg){flex-shrink:0}
+ .filter-summary .filter-chip:hover{border-color:var(--ui-focus)}
  .filter-error{color:#a45043}
  .triage-controls{margin-top:0;margin-bottom:8px}
 
@@ -1015,14 +1352,20 @@
  .organize-menu{max-height:230px;max-width:250px;overflow:auto;border-top:1px solid #87927755}
  .organize-menu label{display:flex;align-items:center;gap:6px;padding:5px 8px;overflow-wrap:anywhere}
  .organize-menu button{display:block;max-width:100%;white-space:normal;text-align:left;overflow-wrap:anywhere}
- .reader-menu{position:relative;font-size:11px}
- .reader-menu-items{position:absolute;top:calc(100% + 8px);right:0;z-index:2;display:grid;min-width:126px;background:#fffefa;border:1px solid #87927777;border-radius:6px;padding:4px;color:#596850;box-shadow:0 4px 12px #0002}
- .reader-menu-items button{justify-content:flex-start;white-space:nowrap}
- :global(.dark) .reader-menu-items{background:#22291f;color:#c5cfba}
+ .reader-menu,.snooze-menu{position:relative;font-size:11px}
+ .reader-menu summary{padding:8px;border-radius:7px}
+ :is(.reader-menu,.snooze-menu)[open] > summary,:is(.reader-menu,.snooze-menu) > summary:hover{background:var(--ui-selection)}
+ .snooze-menu summary{display:grid;place-items:center;cursor:pointer;padding:8px;border-radius:7px}
+ .snooze-menu summary::-webkit-details-marker{display:none}
+ .snooze-menu summary:focus-visible{outline:2px solid var(--mail-focus);outline-offset:2px}
+ .snooze-menu .reader-menu-items{right:auto;left:0}
+ .snooze-deadline{padding:7px 8px;font-weight:600;white-space:nowrap}
+ .reader-menu-items{position:absolute;top:calc(100% + 6px);right:0;z-index:2;display:grid;min-width:154px;width:max-content;max-width:min(260px,75vw)}
+ .reader-menu-items button{justify-content:flex-start;white-space:normal;text-align:start}
  .operation-row{border-bottom:1px solid #87927755;padding:10px 0;font-size:12px;overflow-wrap:anywhere}
  .operation-row small{display:block;margin-top:4px;opacity:.8}
  .operation-row p{margin:4px 0}
- .pagination{display:flex;align-items:center;justify-content:space-between;padding:10px;font-size:11px}.pagination button{padding:6px}.attachment-list{display:flex;flex-wrap:wrap;gap:8px;margin-bottom:20px}.attachment-list button{border:1px solid #8a957e55;padding:10px;font-size:12px;flex-wrap:wrap}.attachment-list small{opacity:.7}.outbox-strip{position:fixed;right:20px;bottom:60px;max-width:380px;background:#34472d;color:#fff;border-radius:10px;z-index:5;box-shadow:0 5px 25px #0003;font-size:12px}.outbox-strip>div{padding:12px;border-bottom:1px solid #ffffff22}.outbox-strip small{display:block;margin:6px 0;line-height:1.5}.outbox-strip button{padding:5px 10px;border:1px solid #ffffff55}.modal select{width:100%;padding:10px;margin-top:6px;border:1px solid #87927755;border-radius:5px;background:inherit;color:inherit}.account>div{overflow-wrap:anywhere}.reader-toolbar{gap:10px}.reply-actions{flex-wrap:wrap}
+ .pagination{display:flex;align-items:center;justify-content:space-between;padding:10px;font-size:11px}.pagination button{padding:6px}.attachment-list{display:flex;flex-wrap:wrap;gap:8px;margin-bottom:20px}.attachment-list button{border:1px solid #8a957e55;padding:10px;font-size:12px;flex-wrap:wrap}.attachment-list small{opacity:.7}.outbox-strip{position:fixed;right:20px;bottom:60px;max-width:380px;background:#34472d;color:#fff;border-radius:10px;z-index:5;box-shadow:0 5px 25px #0003;font-size:12px}.outbox-strip>div{padding:12px;border-bottom:1px solid #ffffff22}.outbox-strip small{display:block;margin:6px 0;line-height:1.5}.outbox-strip button{padding:5px 10px;border:1px solid #ffffff55}.account>div{overflow-wrap:anywhere}.reader-toolbar{gap:10px}.reply-actions{flex-wrap:wrap}
 </style>
 
 

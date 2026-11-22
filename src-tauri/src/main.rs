@@ -14,7 +14,9 @@ mod mail_html;
 mod mail_performance;
 mod notifications;
 mod organization;
+mod outgoing;
 mod providers;
+mod reconcile;
 #[cfg(test)]
 mod threading_tests;
 mod updates;
@@ -82,6 +84,7 @@ fn main() {
             };
             db.execute_batch("CREATE TABLE IF NOT EXISTS accounts(id TEXT PRIMARY KEY, provider TEXT NOT NULL, email TEXT NOT NULL)")?;
             engine::migrate(&db).map_err(std::io::Error::other)?;
+            outgoing::startup_cleanup(&db).map_err(std::io::Error::other)?;
             notifications::initialize(&db).map_err(std::io::Error::other)?;
             if profile.is_some() {
                 db.execute("DELETE FROM accounts", [])?;
@@ -102,7 +105,9 @@ fn main() {
             auth::list_accounts, notifications::unread_counts, notifications::notification_preferences, notifications::set_notification_preferences,
             updates::check_updates,updates::install_update,
             mail_html::load_message_images,mail_html::open_message_link,compose::prepare_compose,compose::copy_forward_attachments,compose::get_account_aliases,compose::save_account_aliases,compose::get_signatures,compose::set_signature,compose::recent_recipients,organization::list_mailboxes,organization::organize_mail,live::get_conversation,live::query_mail,live::sync_account,live::get_mail,live::connect_imap,live::account_status,live::queue_mutation,live::queue_bulk_mutation,live::snooze_mail,live::next_snooze_wake,drafts::save_live_draft,drafts::load_live_draft,drafts::list_live_drafts,drafts::discard_live_draft,live::queue_send,live::list_jobs,live::list_active_jobs,live::cancel_job,
-            live::outgoing_attachments,live::resolve_send,live::retry_mutation,live::pick_attachments,live::save_attachment,
+            live::outgoing_attachments,outgoing::release_outgoing_attachments,live::resolve_send,live::retry_mutation,live::review_mutation,live::pick_attachments,live::save_attachment,
+            live::list_sync_statuses,
+            live::message_snooze_wake,live::unsnooze_mail,
             ai::ai_info,ai::ai_consent,ai::cancel_ai,ai::run_ai
         ])
         .run(tauri::generate_context!())

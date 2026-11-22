@@ -1,4 +1,4 @@
-use crate::{compose, engine::Draft, providers, Store};
+use crate::{compose, engine::Draft, outgoing, providers, Store};
 use rusqlite::{params, OptionalExtension};
 use serde::Serialize;
 
@@ -66,18 +66,20 @@ pub fn save_live_draft(store: tauri::State<Store>, id: String, draft: Draft) -> 
 }
 
 pub fn save(store: &Store, id: &str, draft: &Draft) -> Result<(), String> {
-    if id.len() != 32 || !id.bytes().all(|byte| byte.is_ascii_hexdigit()) {
-        return Err("Invalid draft ID".into());
-    }
+    outgoing::validate_draft_id(id)?;
     compose::validate_draft_storage(draft)?;
     providers::account(store, &draft.account_id)?;
     providers::db(store, |db| {
+        let tx = db.unchecked_transaction().map_err(|e| e.to_string())?;
+        let old = attachment_ids(&tx, id)?;
         for attachment in &draft.attachments {
-            let owned: bool = db
+            let owned: bool = tx
                 .query_row(
                     "SELECT EXISTS(SELECT 1 FROM files f JOIN outgoing_owners o ON o.file_id=f.id
-                 WHERE f.id=?1 AND f.message_id='outgoing' AND o.account_id=?2)",
-                    params![attachment, draft.account_id],
+                 LEFT JOIN outgoing_staged s ON s.file_id=f.id
+                 WHERE f.id=?1 AND f.message_id='outgoing' AND o.account_id=?2
+                   AND (s.file_id IS NULL OR s.draft_id=?3))",
+                    params![attachment, draft.account_id, id],
                     |row| row.get(0),
                 )
                 .map_err(|e| e.to_string())?;
@@ -87,7 +89,7 @@ pub fn save(store: &Store, id: &str, draft: &Draft) -> Result<(), String> {
                 );
             }
         }
-        let changed = db.execute(
+        let changed = tx.execute(
             "INSERT INTO saved_drafts(id,account_id,payload,updated) VALUES(?1,?2,?3,?4)
              ON CONFLICT(id) DO UPDATE SET account_id=excluded.account_id,payload=excluded.payload,updated=excluded.updated
              WHERE saved_drafts.queued_job_id IS NULL",
@@ -97,8 +99,26 @@ pub fn save(store: &Store, id: &str, draft: &Draft) -> Result<(), String> {
         if changed == 0 {
             return Err("This draft is already queued for sending".into());
         }
-        Ok(())
+        outgoing::unstage_files(&tx, id, &draft.attachments)?;
+        let detached: Vec<_> = old
+            .into_iter()
+            .filter(|file| !draft.attachments.contains(file))
+            .collect();
+        outgoing::reclaim_files(&tx, &detached)?;
+        tx.commit().map_err(|e| e.to_string())
     })
+}
+
+fn attachment_ids(db: &rusqlite::Connection, id: &str) -> Result<Vec<String>, String> {
+    let files: Option<String> = db.query_row(
+        "SELECT CASE WHEN json_valid(payload) THEN json_extract(payload,'$.attachments') END FROM saved_drafts WHERE id=?1",
+        [id], |row| row.get::<_, Option<String>>(0),
+    )
+        .optional().map_err(|e| e.to_string())?.flatten();
+    Ok(files
+        .as_deref()
+        .and_then(|ids| serde_json::from_str(ids).ok())
+        .unwrap_or_default())
 }
 
 #[tauri::command]
@@ -125,7 +145,9 @@ pub fn discard_live_draft(store: tauri::State<Store>, id: String) -> Result<(), 
 }
 
 pub fn discard(db: &rusqlite::Connection, id: &str) -> Result<(), String> {
-    if db
+    outgoing::validate_draft_id(id)?;
+    let tx = db.unchecked_transaction().map_err(|e| e.to_string())?;
+    if tx
         .query_row(
             "SELECT EXISTS(SELECT 1 FROM saved_drafts WHERE id=?1 AND queued_job_id IS NOT NULL)",
             [id],
@@ -135,9 +157,13 @@ pub fn discard(db: &rusqlite::Connection, id: &str) -> Result<(), String> {
     {
         return Err("This draft is already queued for sending".into());
     }
-    db.execute("DELETE FROM saved_drafts WHERE id=?1", [id])
+    let mut before = attachment_ids(&tx, id)?;
+    let staged = outgoing::staged_files(&tx, id)?;
+    tx.execute("DELETE FROM saved_drafts WHERE id=?1", [id])
         .map_err(|e| e.to_string())?;
-    Ok(())
+    before.extend(outgoing::unstage_files(&tx, id, &staged)?);
+    outgoing::reclaim_files(&tx, &before)?;
+    tx.commit().map_err(|e| e.to_string())
 }
 
 #[cfg(test)]
@@ -171,6 +197,56 @@ mod tests {
             attachments: vec!["file-a".into()],
             ..Default::default()
         }
+    }
+
+    #[test]
+    fn outgoing_file_survives_a_shared_draft_and_is_removed_with_its_last_reference() {
+        let store = store();
+        let file = {
+            let db = store.0.lock().unwrap();
+            outgoing::store_file(
+                &db,
+                "a",
+                Some(FIRST),
+                "shared.txt".into(),
+                "text/plain".into(),
+                vec![1],
+            )
+            .unwrap()
+            .id
+        };
+        let shared = Draft {
+            attachments: vec![file.clone()],
+            ..draft()
+        };
+        assert!(save(&store, SECOND, &shared).is_err());
+        save(&store, FIRST, &shared).unwrap();
+        save(&store, SECOND, &shared).unwrap();
+        {
+            let db = store.0.lock().unwrap();
+            discard(&db, FIRST).unwrap();
+            let exists: bool = db
+                .query_row(
+                    "SELECT EXISTS(SELECT 1 FROM files WHERE id=?1)",
+                    [&file],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            assert!(exists);
+        }
+        save(
+            &store,
+            SECOND,
+            &Draft {
+                attachments: Vec::new(),
+                ..draft()
+            },
+        )
+        .unwrap();
+        let db = store.0.lock().unwrap();
+        let exists: bool = db.query_row("SELECT EXISTS(SELECT 1 FROM files WHERE id=?1 UNION SELECT 1 FROM outgoing_owners WHERE file_id=?1)", [&file], |row| row.get(0)).unwrap();
+        assert!(!exists);
+        assert!(load(&db, SECOND).unwrap().attachments.is_empty());
     }
 
     #[test]

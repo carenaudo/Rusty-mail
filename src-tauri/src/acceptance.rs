@@ -633,6 +633,7 @@ fn encrypted_cache_accounting_migrates_and_survives_rollback_and_reopen() {
             "CREATE TABLE mail_raw(id TEXT PRIMARY KEY,raw BLOB NOT NULL,accessed INTEGER NOT NULL);
              CREATE TABLE files(id TEXT PRIMARY KEY,message_id TEXT NOT NULL,name TEXT NOT NULL,
                  mime TEXT NOT NULL,data BLOB NOT NULL,created INTEGER NOT NULL);
+             CREATE TABLE outgoing_owners(file_id TEXT PRIMARY KEY,account_id TEXT NOT NULL);
              INSERT INTO mail_raw VALUES('m',X'01020304',0);
              INSERT INTO files VALUES('in','m','in','text/plain',X'0102',0);
              INSERT INTO files VALUES('out','outgoing','out','text/plain',X'01020304',0);
@@ -662,7 +663,7 @@ fn encrypted_cache_accounting_migrates_and_survives_rollback_and_reopen() {
     assert_eq!(
         db.query_row("PRAGMA user_version", [], |row| row.get::<_, i64>(0))
             .unwrap(),
-        13
+        engine::SCHEMA_VERSION
     );
     drop(db);
     std::fs::remove_file(path).unwrap();

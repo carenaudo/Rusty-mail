@@ -7,6 +7,7 @@ const file={id:'original-file',name:'outline.txt',size:120,mime:'text/plain'};
 const message={id:'m',account_id:'a',account:'me@example.com',provider:'google',remote_id:'remote',thread_id:'thread',conversation_key:'native:thread',conversation_count:1,message_id:'<source@example.com>',sender:'Elena',address:'elena@example.com',subject:'An outline',body:'Original text',to:['me@example.com'],cc:['copy@example.com'],reply_to:['reply@example.com'],html_body:'',folder:'inbox',category:'people',unread:false,starred:false,loaded:true,attachments:[file],date:'2026-11-03T12:00:00Z'};
 const calls=[],drafts=new Map();
 let saved=null,slowCopy=false,queuedDraft=null,queuedJob=null,failSend=false;
+const syncStates=new Map();
 const signatures={a:'Primary signature',b:'Other signature'};
 mockIPC(async(cmd,args)=>{
  calls.push({cmd,args});
@@ -19,6 +20,12 @@ mockIPC(async(cmd,args)=>{
   ?[{address:'example@example.com',formatted:'"Example, Recent" <example@example.com>'}]
   :[{address:'second@example.com',formatted:'second@example.com'}];
  if(cmd==='unread_counts')return {a:2};
+ if(cmd==='list_sync_statuses')return structuredClone([...syncStates.values()]);
+ if(cmd==='sync_account'){
+  const state={account_id:args.id,last_success:Date.UTC(2026,10,20,13)/1000,error:null};
+  if(args.id==='a'){state.error='Synthetic provider offline';syncStates.set(args.id,state);throw state.error}
+  syncStates.set(args.id,state);return 1;
+ }
  if(cmd==='next_snooze_wake')return null;
  if(cmd==='list_accounts')return [{id:'a',email:'me@example.com',provider:'google'},{id:'b',email:'other@example.com',provider:'imap'}];
  if(cmd==='query_mail')return {messages:[message],total:1,next_cursor:null};
@@ -38,7 +45,11 @@ mockIPC(async(cmd,args)=>{
  if(cmd==='load_live_draft')return drafts.get(args.id);
  if(cmd==='discard_live_draft'){drafts.delete(args.id);return null}
  if(cmd==='outgoing_attachments')return args.ids.map(id=>({...file,id}));
- if(cmd==='copy_forward_attachments'){if(slowCopy)await new Promise(r=>setTimeout(r,200));return [{...file,id:'outgoing-copy'}]}
+ if(cmd==='copy_forward_attachments'){
+  if(slowCopy){await new Promise(r=>setTimeout(r,200));return [{...file,id:'stale-copy'}]}
+  return [{...file,id:'outgoing-copy'}];
+ }
+ if(cmd==='release_outgoing_attachments')return null;
  if(cmd==='queue_send'){
   if(failSend)throw Error('Synthetic send error');
   queuedDraft=[args.draftId,drafts.get(args.draftId)];
@@ -73,6 +84,10 @@ try{
  await waitFor(()=>calls.some(c=>c.cmd==='save_attachment'&&c.args.messageId==='m'&&c.args.id===file.id));
  const start=performance.now();const replyAllButton=button('Reply all');replyAllButton.focus();replyAllButton.click();await waitFor(()=>document.querySelector('.modal'));
  const composeMs=performance.now()-start;
+ field('Message').dispatchEvent(new KeyboardEvent('keydown',{key:'k',ctrlKey:true,bubbles:true,cancelable:true}));
+ await tick();
+ assert(document.querySelectorAll('.modal').length===1&&document.querySelector('.modal h2').textContent==='Reply all',
+  'The command shortcut does not interrupt the composer');
  assert(field('To').value==='reply@example.com'&&field('Cc').value==='copy@example.com'&&!field('Bcc'),'Reviewed reply-all recipients');
  assert(document.activeElement===field('Message')&&field('Message').selectionStart===0,'Reply focuses the start of the body');
  assert(field('Signature').value==='Primary signature','Reply has account signature');
@@ -145,6 +160,9 @@ try{
  slowCopy=true;document.querySelector('.forward-attachments input').click();await tick();button('Include selected attachments').click();
  set(field('From'),'b');await new Promise(r=>setTimeout(r,300));await tick();await close();
  assert(saved.attachments.length===0&&saved.source_message_id===null,'Slow attachment copy cannot cross sending accounts');
+ const stale=calls.findLast(c=>c.cmd==='copy_forward_attachments');
+ assert(calls.some(c=>c.cmd==='release_outgoing_attachments'&&c.args.draftId===stale.args.draftId&&c.args.ids.includes('stale-copy')),
+  'A late copy is released for the original draft');
  button('Reply').click();await waitFor(()=>document.querySelector('.modal'));
  button('Add Bcc').click();
  await waitFor(()=>field('Bcc'));
@@ -191,6 +209,20 @@ try{
  language.value='en';
  language.dispatchEvent(new Event('change',{bubbles:true}));
  await waitFor(()=>document.querySelector('.modal h2').textContent==='Your preferences');
+ document.querySelector('.modal-header button').click();
+ await waitFor(()=>!document.querySelector('.modal'));
+ document.querySelector('[title="Sync accounts"]').click();
+ await waitFor(()=>document.querySelector('.sync-status summary').textContent==='Sync needs attention');
+ assert(calls.filter(c=>c.cmd==='sync_account').map(c=>c.args.id).join(',')==='a,b','Manual sync continues to the next account after failure');
+ document.querySelector('.sync-status summary').click();
+ const statuses=()=>[...document.querySelectorAll('.sync-status li')];
+ assert(statuses()[0].textContent.includes('Synthetic provider offline')&&!!statuses()[0].querySelector('time'),'Account error and last successful sync are shown together');
+ assert(!!statuses()[1].querySelector('time')&&!statuses()[1].querySelector('.sync-error'),'The other account records success');
+ syncStates.set('a',{...syncStates.get('a'),error:null});
+ const {emit}=await import('@tauri-apps/api/event');
+ await emit('sync-status-changed');
+ await waitFor(()=>document.querySelector('.sync-status summary').textContent==='Sync status');
+ assert(!statuses()[0].querySelector('.sync-error'),'Background recovery clears the displayed error');
 
  document.documentElement.dataset.testResult='passed';document.title='PASS: compose reader';
  document.documentElement.dataset.composeMs=String(composeMs);

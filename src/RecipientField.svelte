@@ -73,7 +73,7 @@
    autocomplete="off" spellcheck="false"/>
   {#if hint}<small>{hint}</small>{/if}
  </label>
- <div id={listId} class="recipients" role="listbox" aria-label={t("Recent recipients")} hidden={!expanded}>
+ <div id={listId} class="recipients option-panel option-list" role="listbox" aria-label={t("Recent recipients")} hidden={!expanded}>
   {#each choices as recipient,index (recipient.address)}
    <button id={listId+'-'+index} type="button" tabindex="-1" role="option"
     aria-selected={active===index} onpointerdown={event=>event.preventDefault()}
@@ -84,11 +84,6 @@
 
 <style>
  .recipient-field{position:relative}
- .recipients{position:absolute;z-index:3;top:100%;left:0;right:0;max-height:170px;overflow:auto;
-  padding:4px;border:1px solid #87927777;border-radius:6px;background:#fffefa;color:#455639;
-  box-shadow:0 4px 12px #0002}
- .recipients button{display:block;width:100%;padding:7px;text-align:left;font-size:12px;overflow-wrap:anywhere}
- .recipients button[aria-selected=true]{background:#edf2e6}
- :global(.dark) .recipients{background:#22291f;color:#c5cfba}
- :global(.dark) .recipients button[aria-selected=true]{background:#303e27}
+ .recipients{position:absolute;z-index:3;top:100%;left:0;right:0;max-height:170px;overflow:auto}
+ .recipients button{display:block;width:100%;overflow-wrap:anywhere}
 </style>

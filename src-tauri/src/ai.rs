@@ -10,7 +10,7 @@ use std::{
     time::Duration,
 };
 #[derive(Default)]
-pub struct AiRuntime(pub AtomicU64);
+pub struct AiRuntime(pub AtomicU64, std::sync::Mutex<Option<String>>);
 #[derive(Serialize)]
 pub struct Info {
     pub configured: bool,
@@ -75,9 +75,13 @@ pub fn ai_consent(
     runtime: tauri::State<AiRuntime>,
     account_id: String,
     allowed: bool,
+    expected_endpoint: Option<String>,
 ) -> Result<(), String> {
     let (raw, _) =
         endpoint(&std::env::var("RUSTYMAIL_LLM_BASE_URL").map_err(|_| "AI is not configured")?)?;
+    if allowed && expected_endpoint.as_deref() != Some(&raw) {
+        return Err("The AI destination changed. Open AI tools again.".into());
+    }
     set_consent(&store, &runtime, &account_id, &raw, allowed)
 }
 fn set_consent(
@@ -109,32 +113,47 @@ fn set_consent(
     })
 }
 #[tauri::command]
-pub fn cancel_ai(runtime: tauri::State<AiRuntime>) {
+pub fn cancel_ai(runtime: tauri::State<AiRuntime>, request_id: String) -> Result<(), String> {
+    let mut cancelled = runtime.1.lock().map_err(|_| "AI state unavailable")?;
+    *cancelled = Some(request_id);
     runtime.0.fetch_add(1, Ordering::SeqCst);
+    Ok(())
 }
 #[tauri::command]
 pub async fn run_ai(
     store: tauri::State<'_, Store>,
     runtime: tauri::State<'_, AiRuntime>,
     id: String,
+    account_id: String,
     task: String,
+    expected_endpoint: String,
+    request_id: String,
 ) -> Result<String, String> {
     // Capture cancellation before checking permission so a concurrent revocation
     // cannot be superseded by a request that checked the old consent.
-    let generation = runtime.0.fetch_add(1, Ordering::SeqCst) + 1;
-    let info = ai_info(
-        store.clone(),
-        db(&store, |d| Ok(engine::get(d, &id)?.account_id))?,
-    )?;
+    let generation = {
+        let cancelled = runtime.1.lock().map_err(|_| "AI state unavailable")?;
+        if cancelled.as_deref() == Some(&request_id) {
+            return Err("AI request cancelled".into());
+        }
+        runtime.0.fetch_add(1, Ordering::SeqCst) + 1
+    };
+    let m = db(&store, |d| engine::get(d, &id))?;
+    if m.account_id != account_id {
+        return Err("The selected message changed. Open AI tools again.".into());
+    }
+    let info = ai_info(store.clone(), account_id)?;
     if !info.configured {
         return Err("Configure RUSTYMAIL_LLM_BASE_URL and RUSTYMAIL_LLM_MODEL to enable AI".into());
+    }
+    if info.endpoint != expected_endpoint {
+        return Err("The AI destination changed. Open AI tools again.".into());
     }
     if info.hosted && !info.consent {
         return Err(
             "Approve this account and model destination before sending message text".into(),
         );
     }
-    let m = db(&store, |d| engine::get(d, &id))?;
     if !m.loaded {
         return Err("Open and download the message before using AI".into());
     }

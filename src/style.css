@@ -14,3 +14,90 @@
 .forward-attachments{border:1px solid #dfe5d7;border-radius:8px;margin:18px 0;padding:12px;font-size:12px}.forward-attachments label{display:flex!important;align-items:center;gap:10px}.forward-attachments input[type=checkbox]{width:auto;display:inline;margin:0}.modal label small{display:block;margin-top:5px;font-size:11px}.forward-attachments button{padding:8px;text-decoration:underline}
 
 .recipient-details{font-size:11px;margin:12px 0;color:#727c68;overflow-wrap:anywhere}.recipient-details summary{cursor:pointer}.recipient-details p{margin:5px 0}
+
+/* Shared surfaces for dialogs, selections, and native form controls. */
+:root {
+ --ui-panel:#fffefa;
+ --ui-text:#30392e;
+ --ui-secondary:#52634a;
+ --ui-control:#f7f9f4;
+ --ui-border:#b6c1ad;
+ --ui-focus:#446a36;
+ --ui-selection:#e9efe2;
+ --ui-radius:9px;
+ --ui-popover-shadow:0 6px 20px #17221328;
+}
+.dark {
+ --ui-panel:#22291f;
+ --ui-text:#e0e7da;
+ --ui-secondary:#b8c6af;
+ --ui-control:#293224;
+ --ui-border:#6f7d66;
+ --ui-focus:#a4c58e;
+ --ui-selection:#303e27;
+ --ui-popover-shadow:0 6px 20px #0005;
+}
+:is(.app,dialog) :is(select,input[type=range],input[type=checkbox]) {accent-color:var(--ui-focus)}
+.app :is(.modal label,.modal p,.recipient-details,.mail-links small) {color:var(--ui-secondary)}
+.app :is(.modal input,.search input,.filter-fields input)::placeholder {
+ color:var(--ui-secondary);
+ opacity:1;
+}
+.app :is(.modal input:not([type=range]):not([type=checkbox]),.modal textarea,.option-select) {
+ background:var(--ui-control);
+ color:var(--ui-text);
+ border:1px solid var(--ui-border);
+ border-radius:7px;
+}
+.app .option-select {
+ display:block;
+ width:100%;
+ min-height:34px;
+ margin-top:5px;
+ padding:6px 9px;
+ font:inherit;
+ font-size:13px;
+}
+.app .language-picker {display:grid;gap:4px;max-width:220px}
+.app .language-picker .option-select {margin-top:0}
+.app .modal input[type=range] {
+ width:100%;
+ min-height:28px;
+ border:0;
+ padding:0;
+ background:transparent;
+}
+.option-panel {
+ background:var(--ui-panel);
+ color:var(--ui-text);
+ border:1px solid var(--ui-border);
+ border-radius:var(--ui-radius);
+ padding:5px;
+ box-shadow:var(--ui-popover-shadow);
+}
+.option-list {font-size:12px}
+.option-list button {
+ min-height:32px;
+ justify-content:flex-start;
+ text-align:start;
+ padding:6px 9px;
+}
+.app .option-list button[aria-selected=true],.app .option-list button:hover {
+ background:var(--ui-selection);
+}
+.app .dialog-surface {
+ background:var(--ui-panel);
+ color:var(--ui-text);
+ border:1px solid var(--ui-border);
+ border-radius:14px;
+ box-shadow:0 16px 48px #10180d50;
+}
+.app .secondary-button {
+ min-height:34px;
+ padding:6px 12px;
+ border:1px solid var(--ui-border);
+ border-radius:7px;
+ color:var(--ui-text);
+ font-size:12px;
+}
+.app .secondary-button:hover {background:var(--ui-selection)}

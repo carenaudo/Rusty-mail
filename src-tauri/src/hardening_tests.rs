@@ -386,12 +386,12 @@ fn cancelling_one_action_preserves_later_fields_and_downloaded_content() {
     live::cancel_job_inner(&store, &star).unwrap();
     let archive = live::queue_mutation_inner(&store, "actions", "archive").unwrap();
     let trash = live::queue_mutation_inner(&store, "actions", "trash").unwrap();
-    store
-        .0
-        .lock()
-        .unwrap()
-        .execute("UPDATE jobs SET status='done' WHERE id=?1", [trash])
-        .unwrap();
+    {
+        let db = store.0.lock().unwrap();
+        db.execute("UPDATE jobs SET status='done' WHERE id=?1", [trash])
+            .unwrap();
+        crate::reconcile::confirm_action(&db, "actions", "trash", None).unwrap();
+    }
     live::cancel_job_inner(&store, &archive).unwrap();
     assert_eq!(
         engine::get(&store.0.lock().unwrap(), "actions")
@@ -406,6 +406,18 @@ fn cancelling_send_removes_its_snapshot_without_submitting() {
     let id = live::queue_send_inner(&store, draft()).unwrap();
     live::cancel_job_inner(&store, &id).unwrap();
     assert!(live::queued_mime(&store, &id).is_err());
+    let attachment_retained: bool = store
+        .0
+        .lock()
+        .unwrap()
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM files WHERE id='attachment'
+                 UNION SELECT 1 FROM outgoing_owners WHERE file_id='attachment')",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert!(!attachment_retained);
     assert_eq!(
         store
             .0

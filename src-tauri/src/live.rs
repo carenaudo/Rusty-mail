@@ -1,7 +1,8 @@
 use crate::{
     engine::{self, Draft, Mail, ServerConfig},
+    outgoing,
     providers::{self, db},
-    Store,
+    reconcile, Store,
 };
 use rusqlite::params;
 use serde_json::json;
@@ -58,23 +59,27 @@ pub async fn sync_account(
     id: String,
 ) -> Result<usize, String> {
     let _guard = runtime.gate.lock().await;
-    db(&store, |db| {
+    let result = db(&store, |db| {
         db.execute(
             "DELETE FROM sync_state WHERE account_id=?1 AND key='folder-catalog'",
             [&id],
         )
         .map_err(|error| error.to_string())?;
         Ok(())
-    })?;
-    let result = sync(&store, &id).await;
+    });
+    let result = match result {
+        Ok(()) => sync(&store, &id).await,
+        Err(error) => Err(error),
+    };
     if result.is_ok() {
         crate::notifications::after_sync(&app, &store, &id);
     }
+    let _ = app.emit("sync-status-changed", ());
     result
 }
-pub async fn sync(store: &Store, id: &str) -> Result<usize, String> {
-    let (provider, _) = providers::account(store, id)?;
+async fn sync(store: &Store, id: &str) -> Result<usize, String> {
     let result = tokio::time::timeout(Duration::from_secs(300), async {
+        let (provider, _) = providers::account(store, id)?;
         match provider.as_str() {
             "google" => providers::sync_google(store, id).await,
             "microsoft" => providers::sync_graph(store, id).await,
@@ -84,12 +89,66 @@ pub async fn sync(store: &Store, id: &str) -> Result<usize, String> {
     })
     .await
     .unwrap_or_else(|_| Err("Sync timed out. It will resume from the saved checkpoint.".into()));
+    db(store, |d| record_sync_status(d, id, &result))?;
+    result
+}
+
+fn record_sync_status(
+    db: &rusqlite::Connection,
+    id: &str,
+    result: &Result<usize, String>,
+) -> Result<(), String> {
+    let tx = db.unchecked_transaction().map_err(|e| e.to_string())?;
     let status = match &result {
-        Ok(n) => format!("Synced {n} messages"),
+        Ok(n) => {
+            engine::checkpoint(&tx, id, "sync-success", &engine::now().to_string())?;
+            format!("Synced {n} messages")
+        }
         Err(e) => e.clone(),
     };
-    db(store, |d| engine::checkpoint(d, id, "status", &status))?;
-    result
+    engine::checkpoint(&tx, id, "status", &status)?;
+    engine::checkpoint(
+        &tx,
+        id,
+        "sync-error",
+        result.as_ref().err().map(String::as_str).unwrap_or(""),
+    )?;
+    tx.commit().map_err(|e| e.to_string())
+}
+
+#[derive(serde::Serialize)]
+pub struct SyncStatus {
+    account_id: String,
+    last_success: Option<i64>,
+    error: Option<String>,
+}
+
+fn sync_statuses(db: &rusqlite::Connection) -> Result<Vec<SyncStatus>, String> {
+    let mut query = db
+        .prepare(
+            "SELECT a.id,CAST(s.value AS INTEGER),nullif(coalesce(e.value,
+           CASE WHEN legacy.value NOT LIKE 'Synced % messages' THEN legacy.value END),'')
+         FROM accounts a
+         LEFT JOIN sync_state s ON s.account_id=a.id AND s.key='sync-success'
+         LEFT JOIN sync_state e ON e.account_id=a.id AND e.key='sync-error'
+         LEFT JOIN sync_state legacy ON legacy.account_id=a.id AND legacy.key='status'",
+        )
+        .map_err(|e| e.to_string())?;
+    let rows = query
+        .query_map([], |row| {
+            Ok(SyncStatus {
+                account_id: row.get(0)?,
+                last_success: row.get(1)?,
+                error: row.get(2)?,
+            })
+        })
+        .map_err(|e| e.to_string())?;
+    rows.collect::<Result<_, _>>().map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub fn list_sync_statuses(store: tauri::State<Store>) -> Result<Vec<SyncStatus>, String> {
+    db(&store, sync_statuses)
 }
 #[tauri::command]
 pub async fn get_mail(
@@ -286,6 +345,7 @@ fn queue_message_mutation(
     mut m: Mail,
     action: &str,
 ) -> Result<String, String> {
+    reconcile::remember(db, &m)?;
     let id = m.id.clone();
     let job = hex::encode(rand::random::<[u8; 16]>());
     let original = UndoFields {
@@ -307,45 +367,59 @@ fn queue_message_mutation(
         ],
     )
     .map_err(|e| e.to_string())?;
-    match action {
-        "read" => m.unread = false,
-        "unread" => m.unread = true,
-        "star" => m.starred = true,
-        "unstar" => m.starred = false,
-        _ => {
-            m.folder = action.to_string();
-            if m.provider == "google" {
-                m.labels
-                    .retain(|label| !matches!(label.as_str(), "INBOX" | "TRASH" | "SPAM"));
-                match action {
-                    "inbox" => m.labels.push("INBOX".into()),
-                    "trash" => m.labels.push("TRASH".into()),
-                    "spam" => m.labels.push("SPAM".into()),
-                    _ => {}
-                }
-            } else {
-                m.labels.clear();
-            }
-        }
-    }
+    retire_failed(db, &m.account_id, &id, action)?;
+    reconcile::apply(&mut m, action);
     engine::put(db, &m)?;
     Ok(job)
 }
 
 #[tauri::command]
 pub fn snooze_mail(store: tauri::State<Store>, id: String, wake: i64) -> Result<(), String> {
+    db(&store, |d| store_snooze(d, &id, wake))
+}
+
+fn store_snooze(db: &rusqlite::Connection, id: &str, wake: i64) -> Result<(), String> {
     if wake <= engine::now() {
         return Err("Snooze must be in the future".into());
     }
-    db(&store, |d| {
-        engine::get(d, &id)?;
-        d.execute(
-            "INSERT OR REPLACE INTO snoozes VALUES(?1,?2)",
+    let changed = db
+        .execute(
+            "INSERT INTO snoozes(id,wake) SELECT id,?2 FROM mail WHERE id=?1
+         ON CONFLICT(id) DO UPDATE SET wake=excluded.wake",
             params![id, wake],
         )
         .map_err(|e| e.to_string())?;
-        Ok(())
-    })
+    if changed == 0 {
+        return Err("Message not found".into());
+    }
+    Ok(())
+}
+
+#[tauri::command]
+pub fn message_snooze_wake(store: tauri::State<Store>, id: String) -> Result<Option<i64>, String> {
+    db(&store, |d| active_snooze(d, &id))
+}
+
+fn active_snooze(db: &rusqlite::Connection, id: &str) -> Result<Option<i64>, String> {
+    use rusqlite::OptionalExtension;
+    db.query_row(
+        "SELECT wake FROM snoozes WHERE id=?1 AND wake>?2",
+        params![id, engine::now()],
+        |row| row.get(0),
+    )
+    .optional()
+    .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub fn unsnooze_mail(store: tauri::State<Store>, id: String) -> Result<(), String> {
+    db(&store, |d| clear_snooze(d, &id))
+}
+
+fn clear_snooze(db: &rusqlite::Connection, id: &str) -> Result<(), String> {
+    db.execute("DELETE FROM snoozes WHERE id=?1", [id])
+        .map_err(|e| e.to_string())?;
+    Ok(())
 }
 #[tauri::command]
 pub fn next_snooze_wake(store: tauri::State<Store>) -> Result<Option<i64>, String> {
@@ -441,14 +515,50 @@ pub fn cancel_job(
 ) -> Result<(), String> {
     cancel_job_inner(&store, &id)?;
     jobs_changed(&app, true);
+    let _ = app.emit("mail-changed", ());
     Ok(())
 }
-fn mutation_field(action: &str) -> &str {
-    match action {
-        "read" | "unread" => "unread",
-        "star" | "unstar" => "starred",
-        _ => "folder",
-    }
+fn retire_failed(
+    d: &rusqlite::Connection,
+    account: &str,
+    id: &str,
+    action: &str,
+) -> Result<(), String> {
+    d.execute(
+        "UPDATE jobs SET status='superseded',detail='A newer action replaced this one'
+         WHERE account_id=?1 AND kind='mutation' AND status='failed' AND json_extract(payload,'$.id')=?2
+           AND (CASE json_extract(payload,'$.action')
+             WHEN 'read' THEN 'unread' WHEN 'unread' THEN 'unread'
+             WHEN 'star' THEN 'starred' WHEN 'unstar' THEN 'starred' ELSE 'folder' END)=?3",
+        params![account,id,reconcile::field(action)],
+    ).map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+#[derive(serde::Deserialize)]
+struct QueuedMutation {
+    id: String,
+    action: String,
+}
+
+fn retire_if_superseded(
+    db: &rusqlite::Connection,
+    job: &str,
+    operation: &QueuedMutation,
+) -> Result<(), String> {
+    db.execute(
+        "UPDATE jobs AS j SET status='superseded', detail='A newer action replaced this one'
+         WHERE j.id=?1 AND EXISTS (
+           SELECT 1 FROM jobs n WHERE n.kind='mutation' AND n.account_id=j.account_id
+             AND n.rowid>j.rowid AND n.status NOT IN ('cancelled','superseded','reviewed')
+             AND json_extract(n.payload,'$.id')=?2
+             AND (CASE json_extract(n.payload,'$.action')
+               WHEN 'read' THEN 'unread' WHEN 'unread' THEN 'unread'
+               WHEN 'star' THEN 'starred' WHEN 'unstar' THEN 'starred' ELSE 'folder' END)=?3)",
+        params![job, operation.id, reconcile::field(&operation.action)],
+    )
+    .map_err(|e| e.to_string())?;
+    Ok(())
 }
 pub fn cancel_job_inner(store: &Store, id: &str) -> Result<(), String> {
     db(store, |d| {
@@ -471,8 +581,8 @@ pub fn cancel_job_inner(store: &Store, id: &str) -> Result<(), String> {
                 serde_json::from_str(&payload).map_err(|_| "Invalid operation")?;
             let original: UndoFields =
                 serde_json::from_value(v["original"].clone()).map_err(|_| "Invalid undo record")?;
-            let field = mutation_field(v["action"].as_str().ok_or("Invalid undo action")?);
-            let mut q=tx.prepare("SELECT payload,status FROM jobs WHERE kind='mutation' AND json_extract(payload,'$.id')=?1 AND rowid>?2 AND status!='cancelled'").map_err(|e|e.to_string())?;
+            let field = reconcile::field(v["action"].as_str().ok_or("Invalid undo action")?);
+            let mut q=tx.prepare("SELECT payload,status FROM jobs WHERE kind='mutation' AND json_extract(payload,'$.id')=?1 AND rowid>?2 AND status NOT IN ('cancelled','superseded','reviewed')").map_err(|e|e.to_string())?;
             let later = q
                 .query_map(params![original.id, rowid], |r| {
                     Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))
@@ -483,14 +593,15 @@ pub fn cancel_job_inner(store: &Store, id: &str) -> Result<(), String> {
                 let (payload, status) = next.map_err(|e| e.to_string())?;
                 let next: serde_json::Value =
                     serde_json::from_str(&payload).map_err(|_| "Invalid later operation")?;
-                if mutation_field(next["action"].as_str().ok_or("Invalid later action")?) == field {
+                if reconcile::field(next["action"].as_str().ok_or("Invalid later action")?) == field
+                {
                     if status != "done" {
                         return Err("Cancel the newer action on this message first".into());
                     }
                     superseded = true;
                 }
             }
-            if !superseded {
+            if !superseded && !reconcile::can_retry(&tx, &original.id)? {
                 if let Ok(mut current) = engine::get(&tx, &original.id) {
                     match field {
                         "unread" => current.unread = original.unread,
@@ -503,6 +614,7 @@ pub fn cancel_job_inner(store: &Store, id: &str) -> Result<(), String> {
                     engine::put(&tx, &current)?;
                 }
             }
+            reconcile::reproject(&tx, &original.id)?;
         } else if kind == "send" {
             tx.execute(
                 "UPDATE saved_drafts SET queued_job_id=NULL WHERE queued_job_id=?1",
@@ -512,6 +624,9 @@ pub fn cancel_job_inner(store: &Store, id: &str) -> Result<(), String> {
         }
         tx.execute("DELETE FROM outbox_mime WHERE job_id=?1", [&id])
             .map_err(|e| e.to_string())?;
+        if kind == "send" {
+            outgoing::reclaim_files(&tx, &outgoing::payload_files(&payload))?;
+        }
         tx.commit().map_err(|e| e.to_string())
     })
 }
@@ -548,6 +663,12 @@ pub fn resolve_send(
             .map_err(|e| e.to_string())?;
         tx.execute("DELETE FROM outbox_mime WHERE job_id=?1", [&id])
             .map_err(|e| e.to_string())?;
+        let payload: String = tx
+            .query_row("SELECT payload FROM jobs WHERE id=?1", [&id], |row| {
+                row.get(0)
+            })
+            .map_err(|e| e.to_string())?;
+        outgoing::reclaim_files(&tx, &outgoing::payload_files(&payload))?;
         tx.commit().map_err(|e| e.to_string())?;
         Ok(())
     })?;
@@ -555,35 +676,176 @@ pub fn resolve_send(
     Ok(())
 }
 #[tauri::command]
-pub fn retry_mutation(
+pub async fn retry_mutation(
     app: tauri::AppHandle,
-    store: tauri::State<Store>,
+    store: tauri::State<'_, Store>,
+    runtime: tauri::State<'_, Arc<Runtime>>,
     id: String,
 ) -> Result<(), String> {
-    db(&store, |d| {
-        d.execute("UPDATE jobs SET status='pending',detail='',due=?2 WHERE id=?1 AND kind='mutation' AND status='failed'",params![id,engine::now()]).map_err(|e|e.to_string())
-    }).map(|changed| {
-        if changed > 0 {
-            jobs_changed(&app, false);
+    let needs_refresh = db(&store, |d| {
+        let message = retry_candidate(d, &id)?;
+        Ok(!reconcile::can_retry(d, &message)?)
+    })?;
+    if needs_refresh {
+        let _guard = runtime.gate.lock().await;
+        let message = db(&store, |d| {
+            reconcile::review_target(d, &retry_candidate(d, &id)?)
+        })?;
+        let observation = timed_mutation_observation(&store, &message).await?;
+        db(&store, |d| {
+            let tx = d.unchecked_transaction().map_err(|e| e.to_string())?;
+            apply_mutation_observation(&tx, &message.id, observation)?;
+            tx.commit().map_err(|e| e.to_string())
+        })?;
+        let _ = app.emit("mail-changed", ());
+    }
+    retry_mutation_inner(&store, &id)?;
+    jobs_changed(&app, false);
+    let _ = app.emit("mail-changed", ());
+    Ok(())
+}
+
+fn retry_mutation_inner(store: &Store, id: &str) -> Result<(), String> {
+    db(store, |d| {
+        let tx = d.unchecked_transaction().map_err(|e| e.to_string())?;
+        let message = retry_candidate(&tx, id)?;
+        if !reconcile::can_retry(&tx, &message)? {
+            return Err("The provider could not confirm this message for retry".into());
         }
+        tx.execute(
+            "UPDATE jobs SET status='pending',detail='',due=?2 WHERE id=?1",
+            params![id, engine::now()],
+        )
+        .map_err(|e| e.to_string())?;
+        reconcile::reproject(&tx, &message)?;
+        tx.commit().map_err(|e| e.to_string())
     })
+}
+
+fn retry_candidate(db: &rusqlite::Connection, id: &str) -> Result<String, String> {
+    let (order, account, message, action): (i64, String, String, String) = db
+        .query_row(
+            "SELECT rowid,account_id,json_extract(payload,'$.id'),json_extract(payload,'$.action')
+             FROM jobs WHERE id=?1 AND kind='mutation' AND status='failed'",
+            [id],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+        )
+        .map_err(|_| "This action is no longer available to retry")?;
+    let newer: bool = db
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM jobs
+             WHERE kind='mutation' AND account_id=?1 AND json_extract(payload,'$.id')=?2
+               AND rowid>?3 AND status NOT IN ('cancelled','superseded','reviewed')
+               AND (CASE json_extract(payload,'$.action')
+                 WHEN 'read' THEN 'unread' WHEN 'unread' THEN 'unread'
+                 WHEN 'star' THEN 'starred' WHEN 'unstar' THEN 'starred' ELSE 'folder' END)=?4)",
+            params![account, message, order, reconcile::field(&action)],
+            |r| r.get(0),
+        )
+        .map_err(|e| e.to_string())?;
+    if newer {
+        return Err("A newer action replaced this one".into());
+    }
+    Ok(message)
+}
+
+async fn timed_mutation_observation(store: &Store, message: &Mail) -> Result<Option<Mail>, String> {
+    tokio::time::timeout(
+        Duration::from_secs(45),
+        providers::refresh_mutation_target(store, message),
+    )
+    .await
+    .map_err(|_| "Mailbox action review timed out")?
+}
+
+fn apply_mutation_observation(
+    db: &rusqlite::Connection,
+    id: &str,
+    observation: Option<Mail>,
+) -> Result<(), String> {
+    match observation {
+        Some(observed) => reconcile::put_remote(db, &observed),
+        None => reconcile::remove_remote(db, id, None),
+    }
+}
+
+#[tauri::command]
+pub async fn review_mutation(
+    app: tauri::AppHandle,
+    store: tauri::State<'_, Store>,
+    runtime: tauri::State<'_, Arc<Runtime>>,
+    id: String,
+) -> Result<(), String> {
+    let _guard = runtime.gate.lock().await;
+    let message = db(&store, |d| {
+        let message: String = d
+            .query_row(
+                "SELECT json_extract(payload,'$.id') FROM jobs
+                     WHERE id=?1 AND kind='mutation' AND status='uncertain'",
+                [&id],
+                |row| row.get(0),
+            )
+            .map_err(|_| "This action does not need review".to_string())?;
+        reconcile::review_target(d, &message)
+    })?;
+    let observed = timed_mutation_observation(&store, &message).await?;
+    db(&store, |d| {
+        let tx = d.unchecked_transaction().map_err(|e| e.to_string())?;
+        tx.execute(
+            "UPDATE jobs SET status='reviewed',detail='User reviewed the mailbox action'
+                    WHERE id=?1 AND status='uncertain'",
+            [&id],
+        )
+        .map_err(|e| e.to_string())?;
+        apply_mutation_observation(&tx, &message.id, observed)?;
+        reconcile::reproject(&tx, &message.id)?;
+        tx.commit().map_err(|e| e.to_string())
+    })?;
+    jobs_changed(&app, false);
+    let _ = app.emit("mail-changed", ());
+    Ok(())
 }
 #[tauri::command]
 pub async fn pick_attachments(
     store: tauri::State<'_, Store>,
     account_id: String,
+    draft_id: String,
 ) -> Result<Vec<engine::Attachment>, String> {
+    outgoing::validate_draft_id(&draft_id)?;
     providers::account(&store, &account_id)?;
-    let files = tokio::task::spawn_blocking(|| {
-        rfd::FileDialog::new()
+    let picked = tokio::task::spawn_blocking(|| {
+        let paths = rfd::FileDialog::new()
             .set_title("Attach files (18 MiB total)")
             .pick_files()
+            .unwrap_or_default();
+        read_attachment_files(paths)
     })
     .await
-    .map_err(|_| "File dialog unavailable")?;
-    let Some(paths) = files else {
+    .map_err(|_| "File dialog unavailable")??;
+    if picked.is_empty() {
         return Ok(Vec::new());
-    };
+    }
+    db(&store, |d| {
+        let tx = d.unchecked_transaction().map_err(|e| e.to_string())?;
+        let files = picked
+            .into_iter()
+            .map(|(name, data)| {
+                outgoing::store_file(
+                    &tx,
+                    &account_id,
+                    Some(&draft_id),
+                    name,
+                    "application/octet-stream".into(),
+                    data,
+                )
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        tx.commit().map_err(|e| e.to_string())?;
+        Ok(files)
+    })
+}
+
+fn read_attachment_files(paths: Vec<std::path::PathBuf>) -> Result<Vec<(String, Vec<u8>)>, String> {
     if paths.len() > 20 {
         return Err("Choose at most 20 attachments".into());
     }
@@ -607,33 +869,12 @@ pub async fn pick_attachments(
         if total > 18 * 1024 * 1024 {
             return Err("Attachment changed or exceeds 18 MiB".into());
         }
-        let id = hex::encode(rand::random::<[u8; 16]>());
         let name = engine::safe_filename(
             path.file_name()
                 .and_then(|s| s.to_str())
                 .unwrap_or("attachment.bin"),
         );
-        db(&store, |d| {
-            let tx = d.unchecked_transaction().map_err(|e| e.to_string())?;
-            tx.execute(
-                "INSERT INTO files VALUES(?1,'outgoing',?2,'application/octet-stream',?3,?4)",
-                params![id, name, data, engine::now()],
-            )
-            .map_err(|e| e.to_string())?;
-            tx.execute(
-                "INSERT INTO outgoing_owners VALUES(?1,?2)",
-                params![id, account_id],
-            )
-            .map_err(|e| e.to_string())?;
-            tx.commit().map_err(|e| e.to_string())?;
-            Ok(())
-        })?;
-        result.push(engine::Attachment {
-            id,
-            name,
-            size: data.len(),
-            mime: "application/octet-stream".into(),
-        })
+        result.push((name, data));
     }
     Ok(result)
 }
@@ -675,13 +916,17 @@ fn jobs_changed(app: &tauri::AppHandle, drafts_changed: bool) {
 
 #[cfg(test)]
 pub async fn process_jobs(store: &Store) -> Result<bool, String> {
-    process_job(store, |_| {}).await
+    process_job(store, |_, _| {}).await
 }
 
-async fn process_job(store: &Store, on_change: impl Fn(bool)) -> Result<bool, String> {
+async fn process_job(store: &Store, on_change: impl Fn(bool, bool)) -> Result<bool, String> {
     let next: Option<(String, String, String)> = db(store, |d| {
         use rusqlite::OptionalExtension;
-        d.query_row("SELECT id,kind,payload FROM jobs WHERE status='pending' AND due<=?1 ORDER BY rowid LIMIT 1",[engine::now()],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?))).optional().map_err(|e|e.to_string())
+        d.query_row("SELECT j.id,j.kind,j.payload FROM jobs j WHERE j.status='pending' AND j.due<=?1
+                     AND (j.kind!='mutation' OR NOT EXISTS (SELECT 1 FROM jobs u
+                       WHERE u.account_id=j.account_id AND u.kind='mutation' AND u.status='uncertain'
+                         AND json_extract(u.payload,'$.id')=json_extract(j.payload,'$.id')))
+                     ORDER BY j.rowid LIMIT 1",[engine::now()],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?))).optional().map_err(|e|e.to_string())
     })?;
     let Some((id, kind, payload)) = next else {
         return Ok(false);
@@ -692,8 +937,11 @@ async fn process_job(store: &Store, on_change: impl Fn(bool)) -> Result<bool, St
     if changed == 0 {
         return Ok(false);
     }
-    on_change(false);
+    on_change(false, false);
     let mut safe_to_restore = false;
+    let mut uncertain = false;
+    let mut mutation = None;
+    let mut gmail_labels = None;
     let result = if kind == "send" {
         match serde_json::from_str::<Draft>(&payload) {
             Ok(draft) => match queued_mime(store, &id) {
@@ -709,11 +957,22 @@ async fn process_job(store: &Store, on_change: impl Fn(bool)) -> Result<bool, St
             }
         }
     } else {
-        match serde_json::from_str::<serde_json::Value>(&payload) {
-            Ok(v) => match db(store, |d| engine::get(d, v["id"].as_str().unwrap_or(""))) {
-                Ok(m) => providers::mutate(store, &m, v["action"].as_str().unwrap_or("")).await,
-                Err(e) => Err(e),
-            },
+        match serde_json::from_str::<QueuedMutation>(&payload) {
+            Ok(operation) => {
+                let target = db(store, |d| reconcile::mutation_target(d, &operation.id));
+                let outcome = match target {
+                    Ok(mail) => providers::mutate(store, &mail, &operation.action)
+                        .await
+                        .map(|labels| gmail_labels = labels)
+                        .map_err(|failure| {
+                            uncertain = failure.uncertain;
+                            failure.detail
+                        }),
+                    Err(error) => Err(error),
+                };
+                mutation = Some(operation);
+                outcome
+            }
             Err(_) => Err("Invalid operation".into()),
         }
     };
@@ -723,6 +982,7 @@ async fn process_job(store: &Store, on_change: impl Fn(bool)) -> Result<bool, St
             "uncertain",
             format!("{e}. Check Sent before composing another send; automatic retry is disabled."),
         ),
+        Err(e) if uncertain => ("uncertain", e),
         Err(e) => ("failed", e),
     };
     db(store, |d| {
@@ -732,6 +992,14 @@ async fn process_job(store: &Store, on_change: impl Fn(bool)) -> Result<bool, St
             params![id, status, detail],
         )
         .map_err(|e| e.to_string())?;
+        if let Some(operation) = &mutation {
+            if status == "done" {
+                reconcile::confirm_action(&tx, &operation.id, &operation.action, gmail_labels)?;
+            } else if status == "failed" {
+                retire_if_superseded(&tx, &id, operation)?;
+            }
+            reconcile::reproject(&tx, &operation.id)?;
+        }
         if safe_to_restore {
             tx.execute(
                 "UPDATE saved_drafts SET queued_job_id=NULL WHERE queued_job_id=?1",
@@ -752,10 +1020,16 @@ async fn process_job(store: &Store, on_change: impl Fn(bool)) -> Result<bool, St
             )
             .map_err(|e| e.to_string())?;
         }
+        if kind == "send" && (status == "done" || safe_to_restore) {
+            outgoing::reclaim_files(&tx, &outgoing::payload_files(&payload))?;
+        }
         tx.commit().map_err(|e| e.to_string())?;
         Ok(())
     })?;
-    on_change(safe_to_restore || (kind == "send" && status == "done"));
+    on_change(
+        safe_to_restore || (kind == "send" && status == "done"),
+        mutation.is_some(),
+    );
     Ok(true)
 }
 pub fn queued_mime(store: &Store, id: &str) -> Result<Vec<u8>, String> {
@@ -795,7 +1069,12 @@ pub fn start_worker(app: tauri::AppHandle, store: Store, runtime: Arc<Runtime>) 
             run_worker_step(
                 &store,
                 &runtime,
-                |drafts| jobs_changed(&app, drafts),
+                |drafts, mail| {
+                    jobs_changed(&app, drafts);
+                    if mail {
+                        let _ = app.emit("mail-changed", ());
+                    }
+                },
                 account.map(|id| {
                     let app = &app;
                     let store = &store;
@@ -803,6 +1082,7 @@ pub fn start_worker(app: tauri::AppHandle, store: Store, runtime: Arc<Runtime>) 
                         if sync(store, &id).await.is_ok() {
                             crate::notifications::after_sync(app, store, &id);
                         }
+                        let _ = app.emit("sync-status-changed", ());
                         let _ = app.emit("mail-changed", ());
                     }
                 }),
@@ -818,7 +1098,7 @@ pub fn start_worker(app: tauri::AppHandle, store: Store, runtime: Arc<Runtime>) 
 async fn run_worker_step(
     store: &Store,
     runtime: &Runtime,
-    on_job_change: impl Fn(bool),
+    on_job_change: impl Fn(bool, bool),
     sync_account: Option<impl std::future::Future<Output = ()>>,
 ) {
     {
@@ -835,6 +1115,141 @@ async fn run_worker_step(
 mod worker_tests {
     use super::*;
 
+    #[test]
+    fn snooze_can_be_rescheduled_and_ended_without_changing_the_mailbox() {
+        let db = rusqlite::Connection::open_in_memory().unwrap();
+        engine::migrate(&db).unwrap();
+        let mail = Mail {
+            id: "snoozed-message".into(),
+            remote_id: "remote".into(),
+            account_id: "account".into(),
+            folder: "inbox".into(),
+            ..Default::default()
+        };
+        engine::put(&db, &mail).unwrap();
+        let now = engine::now();
+        assert!(store_snooze(&db, "missing", now + 60).is_err());
+        assert!(store_snooze(&db, &mail.id, now).is_err());
+        store_snooze(&db, &mail.id, now + 3600).unwrap();
+        store_snooze(&db, &mail.id, now + 7200).unwrap();
+        assert_eq!(active_snooze(&db, &mail.id).unwrap(), Some(now + 7200));
+        assert_eq!(
+            engine::query_conversations(&db, "inbox", "", "", 0, None)
+                .unwrap()
+                .total,
+            0
+        );
+        assert_eq!(
+            engine::query_conversations(&db, "snoozed", "", "", 0, None)
+                .unwrap()
+                .total,
+            1
+        );
+        clear_snooze(&db, &mail.id).unwrap();
+        clear_snooze(&db, &mail.id).unwrap();
+        assert_eq!(active_snooze(&db, &mail.id).unwrap(), None);
+        assert_eq!(
+            engine::query_conversations(&db, "inbox", "", "", 0, None)
+                .unwrap()
+                .total,
+            1
+        );
+        assert_eq!(
+            engine::query_conversations(&db, "snoozed", "", "", 0, None)
+                .unwrap()
+                .total,
+            0
+        );
+        assert_eq!(engine::get(&db, &mail.id).unwrap().folder, "inbox");
+    }
+
+    #[test]
+    fn account_sync_failure_keeps_the_previous_success_and_recovery_clears_the_error() {
+        let db = rusqlite::Connection::open_in_memory().unwrap();
+        engine::migrate(&db).unwrap();
+        db.execute_batch(
+            "CREATE TABLE accounts(id TEXT PRIMARY KEY);
+            INSERT INTO accounts VALUES('a'),('b');",
+        )
+        .unwrap();
+        engine::checkpoint(&db, "a", "sync-success", "42").unwrap();
+        record_sync_status(&db, "a", &Err("Synthetic provider offline".into())).unwrap();
+        record_sync_status(&db, "b", &Ok(1)).unwrap();
+        let states = sync_statuses(&db).unwrap();
+        let first = states
+            .iter()
+            .find(|status| status.account_id == "a")
+            .unwrap();
+        assert_eq!(first.last_success, Some(42));
+        assert_eq!(first.error.as_deref(), Some("Synthetic provider offline"));
+        let second = states
+            .iter()
+            .find(|status| status.account_id == "b")
+            .unwrap();
+        assert!(second.last_success.is_some() && second.error.is_none());
+        record_sync_status(&db, "a", &Ok(0)).unwrap();
+        let first = sync_statuses(&db)
+            .unwrap()
+            .into_iter()
+            .find(|status| status.account_id == "a")
+            .unwrap();
+        assert!(first.last_success.unwrap() > 42);
+        assert!(first.error.is_none());
+    }
+
+    #[test]
+    fn failed_actions_revert_only_their_field_and_cannot_retry_after_newer_intent() {
+        let database = rusqlite::Connection::open_in_memory().unwrap();
+        engine::migrate(&database).unwrap();
+        let store = Store(Arc::new(std::sync::Mutex::new(database)));
+        let message = Mail {
+            id: "message".into(),
+            account_id: "account".into(),
+            remote_id: "remote".into(),
+            folder: "inbox".into(),
+            unread: true,
+            ..Default::default()
+        };
+        db(&store, |d| engine::put(d, &message)).unwrap();
+        let read = queue_mutation_inner(&store, "message", "read").unwrap();
+        let star = queue_mutation_inner(&store, "message", "star").unwrap();
+        db(&store, |d| {
+            d.execute("UPDATE jobs SET status='failed' WHERE id=?1", [&read])
+                .unwrap();
+            reconcile::reproject(d, "message")?;
+            let mail = engine::get(d, "message")?;
+            assert!(mail.unread && mail.starred);
+            Ok(())
+        })
+        .unwrap();
+        retry_mutation_inner(&store, &read).unwrap();
+        db(&store, |d| {
+            let mail = engine::get(d, "message")?;
+            assert!(!mail.unread && mail.starred);
+            d.execute("UPDATE jobs SET status='failed' WHERE id=?1", [&read])
+                .unwrap();
+            reconcile::reproject(d, "message")
+        })
+        .unwrap();
+        queue_mutation_inner(&store, "message", "unread").unwrap();
+        assert!(retry_mutation_inner(&store, &read).is_err());
+        db(&store, |d| {
+            d.execute("UPDATE jobs SET status='running' WHERE id=?1", [&star])
+                .unwrap();
+            engine::migrate(d)?;
+            let mail = engine::get(d, "message")?;
+            assert!(mail.unread && !mail.starred);
+            let status: String = d
+                .query_row("SELECT status FROM jobs WHERE id=?1", [&star], |row| {
+                    row.get(0)
+                })
+                .unwrap();
+            assert_eq!(status, "uncertain");
+            Ok(())
+        })
+        .unwrap();
+    }
+
     #[tokio::test]
     async fn due_job_runs_between_account_syncs() {
         let database = rusqlite::Connection::open_in_memory().unwrap();
@@ -842,7 +1257,7 @@ mod worker_tests {
         let store = Store(Arc::new(std::sync::Mutex::new(database)));
         let runtime = Runtime::default();
         let trace = std::cell::RefCell::new(Vec::new());
-        let on_change = |_| {
+        let on_change = |_, _| {
             let status = db(&store, |d| {
                 d.query_row("SELECT status FROM jobs WHERE id='due'", [], |row| {
                     row.get::<_, String>(0)

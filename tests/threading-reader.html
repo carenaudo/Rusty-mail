@@ -11,7 +11,8 @@ const newer={...base,id:'newer',remote_id:'newer',sender:'Marcus Chen',address:'
 const other={...base,id:'other',remote_id:'other',thread_id:imap?'':'other-thread',conversation_key:imap?'subject:other-thread':'native:other-thread',sender:'Sofia',address:'sofia@example.com',subject:'Coffee next week?',body:'Would Tuesday work?',folder:'inbox',conversation_count:1,date:'2026-10-28T12:00:00Z'};
 const later={...other,id:'later',remote_id:'later',subject:'Second page'};
 const calls=[]; let failOlder=true; let slowOlder=false; let showOther=true; let notificationPrefs={enabled:false,previews:false};
-let wake=null, releaseSearch;
+let wake=null, releaseSearch, releaseInfo, releaseConsent, finishAi, aiMode='lookup';
+const scheduled=new Map();
 const failedJobs=Array.from({length:25},(_,i)=>({
  id:'failure-'+i,account_id:'a',kind:'mutation',status:'failed',detail:'Provider failed',
  subject:'Failed message '+i,due:0
@@ -19,11 +20,22 @@ const failedJobs=Array.from({length:25},(_,i)=>({
 mockIPC(async(cmd,args)=>{
  calls.push({cmd,args});
  if(cmd==='list_mailboxes')return [{id:'project',account_id:'a',name:'Project folder',label:!imap}];
- if(cmd==='organize_mail')return null;
+ if(cmd==='organize_mail'){
+  if(args.enabled!==null){
+   const m=[older,newer,other].find(m=>m.id===args.id);
+   const labels=(m.labels||[]).filter(label=>label!==args.target);
+   m.labels=args.enabled?[...labels,args.target]:labels;
+  }
+  return null;
+ }
  if(cmd==='get_signatures')return {};
  if(cmd==='recent_recipients')return [];
  if(cmd==='unread_counts')return {a:2};
- if(cmd==='next_snooze_wake')return wake*1000>Date.now()?wake:null;
+ if(cmd==='list_sync_statuses')return [];
+ if(cmd==='next_snooze_wake')return [wake,...scheduled.values()].filter(value=>value*1000>Date.now()).sort((a,b)=>a-b)[0]??null;
+ if(cmd==='message_snooze_wake')return scheduled.get(args.id)??null;
+ if(cmd==='snooze_mail'){scheduled.set(args.id,args.wake);return null}
+ if(cmd==='unsnooze_mail'){scheduled.delete(args.id);return null}
  if(cmd==='get_account_aliases')return {};
  if(cmd==='notification_preferences')return notificationPrefs;
  if(cmd==='set_notification_preferences')return notificationPrefs=args.value;
@@ -33,9 +45,14 @@ mockIPC(async(cmd,args)=>{
    await new Promise(resolve=>releaseSearch=resolve);
    return {messages:[later],total:1,next_cursor:null};
   }
+  if(args.folder==='snoozed'){
+   const messages=[newer,other].filter(m=>scheduled.has(m.id));
+   return {messages,total:messages.length,next_cursor:null};
+  }
+  const visible=(showOther?[newer,other]:[newer]).filter(m=>!scheduled.has(m.id));
   return args.cursor
    ?{messages:[later],total:3,next_cursor:null}
-   :{messages:showOther?[newer,other]:[newer],total:showOther?3:2,next_cursor:{received:1,id:'other'}};
+   :{messages:visible,total:visible.length+1,next_cursor:{received:1,id:'other'}};
  }
  if(cmd==='get_conversation')return args.id==='other'?[other]:[older,newer];
  if(cmd==='get_mail'){
@@ -56,6 +73,14 @@ mockIPC(async(cmd,args)=>{
   next_offset:args.offset+20<failedJobs.length?args.offset+20:null
  };
  if(cmd==='retry_mutation')return null;
+ if(cmd==='review_mutation')return null;
+ if(cmd==='ai_info'){
+  if(aiMode==='lookup')await new Promise(resolve=>releaseInfo=resolve);
+  return {configured:true,endpoint:'https://models.example.invalid/v1',model:'synthetic',hosted:true,consent:aiMode==='run'};
+ }
+ if(cmd==='ai_consent'){await new Promise(resolve=>releaseConsent=resolve);return null}
+ if(cmd==='run_ai')return new Promise(resolve=>finishAi=resolve);
+ if(cmd==='cancel_ai')return null;
  if(cmd==='prepare_compose'){const m=[older,newer,other].find(m=>m.id===args.id);return {draft:{account_id:'a',to:m.address,cc:'',bcc:'',subject:'Re: '+m.subject,body:'Quote',reply_message_id:m.message_id,source_message_id:m.id,mode:args.mode,attachments:[]},available_attachments:[]}}
  if(cmd==='save_live_draft')return null;
  throw new Error(`Unexpected IPC: ${cmd}`);
@@ -69,7 +94,8 @@ function enter(input,value,event){
  input.value=value;
  input.dispatchEvent(new Event(event,{bubbles:true}));
 }
-async function waitFor(check){for(let i=0;i<100;i++){await new Promise(r=>setTimeout(r,20));await tick();if(check())return}throw new Error('Timed out waiting for reader')}
+let step='reader setup';
+async function waitFor(check){for(let i=0;i<150;i++){await new Promise(r=>setTimeout(r,20));await tick();if(check())return}throw new Error('Timed out at '+step+' after '+calls.slice(-4).map(c=>c.cmd).join(', '))}
 try {
  await waitFor(()=>document.querySelectorAll('.message').length===2);
  document.querySelector('.message').click();
@@ -173,6 +199,12 @@ try {
  assert(batch.action==='read'&&batch.rowIds.join()==='newer','Bulk action sends the selected row and action');
  assert(batch.scope.filters.unread&&batch.scope.filters.sender==='Marcus@Example.com'
   &&batch.scope.filters.received_from===fromBoundary&&batch.scope.filters.received_before===throughBoundary,'Bulk action uses the displayed search filters and local date boundaries');
+ document.querySelector('[data-filter="sender"]').click();
+ await waitFor(()=>calls.findLast(c=>c.cmd==='query_mail').args.filters?.sender==='');
+ const remaining=calls.findLast(c=>c.cmd==='query_mail').args.filters;
+ assert(remaining.unread&&remaining.received_from===fromBoundary&&remaining.received_before===throughBoundary,
+  'Removing the sender filter preserves the unread and date filters');
+ assert(document.activeElement?.dataset.filter==='from','Removing a filter keeps focus on a neighboring filter');
  byText('.filter-summary button','Clear filters').click();
  await waitFor(()=>calls.findLast(c=>c.cmd==='query_mail').args.filters===null);
  assert(!document.querySelector('.filter-summary'),'Clear filters removes active indicators');
@@ -225,6 +257,7 @@ try {
  await waitFor(()=>document.querySelector('.body')?.textContent.includes('original outline'));
  assert(document.querySelector('.list-heading h1').textContent==='All inbox','Notification opens its message in the account inbox');
 
+ step='coalesced search';
  const searchInput=document.querySelector('input[aria-label="Search downloaded mail"]');
  enter(searchInput,'held','input');
  await waitFor(()=>releaseSearch);
@@ -239,13 +272,15 @@ try {
  assert(!calls.some(c=>c.cmd==='query_mail'&&c.args.search==='superseded'),'Only the latest pending query runs');
  assert(!document.querySelector('.row-subject').textContent.includes('Second page'),'Old search results are discarded');
 
+ step='job transitions';
  failedJobs[0].status='running';
  await emit('jobs-changed',false);
  await waitFor(()=>document.querySelector('.outbox-strip strong')?.textContent.includes('running'));
  failedJobs[0].status='done';
  await emit('jobs-changed',false);
  await waitFor(()=>document.querySelector('.outbox-strip strong')?.textContent.includes('failed'));
- wake=Math.floor(Date.now()/1000)+1;
+ step='snooze expiry';
+ wake=Math.floor(Date.now()/1000)+2;
  window.dispatchEvent(new Event('focus'));
  await waitFor(()=>calls.filter(c=>c.cmd==='next_snooze_wake').length>=2&&!selectPage().disabled);
  const queriesBeforeWake=calls.filter(c=>c.cmd==='query_mail').length;
@@ -256,6 +291,138 @@ try {
  await new Promise(r=>setTimeout(r,2100));
  assert(calls.filter(c=>c.cmd==='list_jobs').length===jobsBeforeWake,'Idle WebView does not poll jobs');
  assert(calls.filter(c=>c.cmd==='query_mail').length===queriesBeforeWake+1,'Snooze expiry refreshes the mailbox once');
+ step='uncertain job review';
+ failedJobs[0].status='uncertain';
+ await emit('jobs-changed',false);
+ await waitFor(()=>byText('.outbox-strip button','Sync and dismiss'));
+ byText('.outbox-strip button','Sync and dismiss').click();
+ await waitFor(()=>calls.some(c=>c.cmd==='review_mutation'&&c.args.id==='failure-0'));
+
+ step='AI selection during lookup';
+ showOther=true;
+ enter(searchInput,'','input');
+ await waitFor(()=>document.querySelectorAll('.message').length===2);
+ const openReader=async(index,text)=>{
+  document.querySelectorAll('.message')[index].click();
+  await waitFor(()=>document.querySelector('.body')?.textContent.includes(text));
+ };
+ const aiButton=()=>byText('.reader-ai button','Summarize');
+ await openReader(0,'outline looks good');
+ aiButton().click();
+ await waitFor(()=>releaseInfo);
+ await openReader(1,'Tuesday');
+ aiMode='consent';
+ releaseInfo();
+ await waitFor(()=>!aiButton().disabled);
+ assert(!document.querySelector('.modal'),'Stale AI destination lookup cannot ask consent for the next message');
+ step='AI selection during approval';
+ aiButton().click();
+ await waitFor(()=>byText('.modal button','Allow this destination and continue'));
+ byText('.modal button','Allow this destination and continue').click();
+ await waitFor(()=>releaseConsent);
+ assert(calls.findLast(c=>c.cmd==='ai_consent').args.expectedEndpoint==='https://models.example.invalid/v1','Consent includes the displayed destination');
+ await openReader(0,'outline looks good');
+ releaseConsent();
+ await waitFor(()=>!aiButton().disabled);
+ assert(!calls.some(c=>c.cmd==='run_ai'),'Approval for the previous message cannot start a request');
+ step='AI selection during request';
+ aiMode='run';
+ aiButton().click();
+ await waitFor(()=>finishAi);
+ const request=calls.findLast(c=>c.cmd==='run_ai').args;
+ assert(request.id==='newer'&&request.accountId==='a'&&request.task==='summary'&&request.expectedEndpoint==='https://models.example.invalid/v1','Run includes the exact message, account, task and destination');
+ await openReader(1,'Tuesday');
+ await waitFor(()=>calls.some(c=>c.cmd==='cancel_ai'&&c.args.requestId===request.requestId));
+ assert(aiButton().disabled,'The next request waits until the previous one settles');
+ finishAi('Stale model response');
+ await waitFor(()=>!aiButton().disabled);
+ assert(!document.querySelector('.ai-result'),'A cancelled response cannot appear in another message');
+
+ step='snooze preset and early return';
+ const snoozeSummary=()=>document.querySelector('.snooze-menu summary');
+ snoozeSummary().click();
+ const hourStart=Math.floor(Date.now()/1000);
+ byText('.snooze-menu button','In one hour').click();
+ await waitFor(()=>scheduled.has('other')&&document.querySelectorAll('.message').length===1);
+ assert(scheduled.get('other')>=hourStart+3600&&scheduled.get('other')<=hourStart+3601,
+  'The one-hour preset uses an elapsed hour for the selected member');
+ byText('#mail-navigation nav button','Snoozed').click();
+ await waitFor(()=>document.querySelector('.row-subject')?.textContent.includes('Coffee next week'));
+ assert(document.querySelector('.list-heading h1').textContent==='Snoozed','The Snoozed heading matches navigation');
+ document.querySelector('.message').click();
+ await waitFor(()=>document.querySelector('.body')?.textContent.includes('Tuesday'));
+ snoozeSummary().click();
+ await waitFor(()=>byText('.snooze-menu button','End snooze'));
+ const before=Date.now();
+ byText('.snooze-menu button','Tomorrow at 9 AM').click();
+ const tomorrow=new Date(before);
+ tomorrow.setDate(tomorrow.getDate()+1);tomorrow.setHours(9,0,0,0);
+ await waitFor(()=>scheduled.get('other')===tomorrow.getTime()/1000);
+ assert(document.querySelectorAll('.message').length===1,'Rescheduling keeps the message in Snoozed');
+ snoozeSummary().click();
+ await waitFor(()=>byText('.snooze-menu button','End snooze')&&!byText('.snooze-menu button','End snooze').disabled);
+ const schedulesBeforeMonday=calls.filter(c=>c.cmd==='snooze_mail').length;
+ byText('.snooze-menu button','Next Monday at 9 AM').click();
+ await waitFor(()=>calls.filter(c=>c.cmd==='snooze_mail').length===schedulesBeforeMonday+1);
+ const monday=new Date(calls.findLast(c=>c.cmd==='snooze_mail').args.wake*1000);
+ assert(monday.getDay()===1&&monday.getHours()===9&&monday.getMinutes()===0&&monday.getTime()>Date.now(),
+  'The Monday preset uses the next Monday at local 9 AM');
+ snoozeSummary().click();
+ await waitFor(()=>byText('.snooze-menu button','End snooze')&&!byText('.snooze-menu button','End snooze').disabled);
+ byText('.snooze-menu button','End snooze').click();
+ await waitFor(()=>!scheduled.has('other')&&!document.querySelector('.message'));
+ [...document.querySelectorAll('#mail-navigation nav button')].find(button=>button.textContent.trim().startsWith('All inbox')).click();
+ await waitFor(()=>[...document.querySelectorAll('.row-subject')].some(row=>row.textContent.includes('Coffee next week')));
+ assert(calls.some(c=>c.cmd==='unsnooze_mail'&&c.args.id==='other'),'Ending the snooze targets the same message');
+
+ step='sender filter from reader';
+ await openReader(0,'outline looks good');
+ await waitFor(()=>document.querySelector('.conversation-message'));
+ document.querySelector('.conversation-message').click();
+ await waitFor(()=>document.querySelector('.body')?.textContent.includes('original outline'));
+ byText('.reader-toolbar button','Focus mode').click();
+ await waitFor(()=>!document.querySelector('.message-list'));
+ document.querySelector('.reader-menu summary').click();
+ byText('.reader-menu button','Filter by this sender').click();
+ await waitFor(()=>calls.findLast(c=>c.cmd==='query_mail').args.filters?.sender==='elena@example.com');
+ const senderScope=calls.findLast(c=>c.cmd==='query_mail').args;
+ assert(senderScope.folder==='inbox'&&senderScope.account==='a'&&senderScope.cursor===null,
+  'The expanded sender filters the current mailbox and account from the first page');
+ assert(document.activeElement?.dataset.filter==='sender','The sender filter reveals results and receives focus after leaving Focus mode');
+ document.querySelector('[data-filter="sender"]').click();
+ await waitFor(()=>calls.findLast(c=>c.cmd==='query_mail').args.filters===null);
+ assert(document.activeElement===document.querySelector('.mail-filters summary'),'Removing the last filter returns focus to Filters');
+
+ step='mail keyboard shortcuts';
+ const press=(key,target=document.body,options={})=>target.dispatchEvent(new KeyboardEvent('keydown',
+  {key,bubbles:true,cancelable:true,...options}));
+ byText('.reader-toolbar button','Focus mode').click();
+ await waitFor(()=>!document.querySelector('.message-list'));
+ press('/');
+ await waitFor(()=>document.activeElement?.getAttribute('aria-keyshortcuts')==='/');
+ const keyboardSearch=document.activeElement;
+ enter(keyboardSearch,'keyboard','input');
+ await waitFor(()=>calls.findLast(c=>c.cmd==='query_mail').args.search==='keyboard'&&!selectPage().disabled);
+ const archives=()=>calls.filter(c=>c.cmd==='queue_mutation'&&c.args.action==='archive').length;
+ const beforeArchive=archives();
+ press('e',keyboardSearch);
+ press('Escape',keyboardSearch);
+ assert(keyboardSearch.value==='keyboard'&&document.activeElement?.dataset.messageId==='newer',
+  'Escape returns from search to the selected conversation and keeps the search text');
+ const rows=document.querySelector('.rows');
+ rows.style.maxHeight='80px';
+ press('j',document.activeElement);
+ await waitFor(()=>document.querySelector('.body')?.textContent.includes('Tuesday'));
+ assert(document.activeElement.dataset.messageId==='other'&&rows.scrollTop>0,
+  'J focuses the next row and scrolls it into view');
+ await waitFor(()=>!selectPage().disabled);
+ press('k',document.activeElement);
+ await waitFor(()=>document.querySelector('.body')?.textContent.includes('outline looks good'));
+ assert(document.activeElement.dataset.messageId==='newer','K focuses the preceding row');
+ press('e',document.activeElement,{repeat:true});
+ press('e',document.activeElement,{isComposing:true});
+ await tick();
+ assert(archives()===beforeArchive,'Typing, composition and key auto-repeat do not trigger archive');
  document.title='PASS: threading reader';
  document.documentElement.dataset.testResult='passed';
 } catch(e) {document.title='FAIL: '+e.message;document.documentElement.dataset.testResult=String(e);console.error(e)}

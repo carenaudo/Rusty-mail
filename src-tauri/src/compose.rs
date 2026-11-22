@@ -445,6 +445,7 @@ pub fn copy_attachments_inner(
     message_id: &str,
     account_id: &str,
     ids: &[String],
+    draft_id: Option<&str>,
 ) -> Result<Vec<Attachment>, String> {
     providers::account(store, account_id)?;
     if ids.len() > 20 {
@@ -476,23 +477,9 @@ pub fn copy_attachments_inner(
             if total > 18 * 1024 * 1024 {
                 return Err("Forward attachments exceed 18 MiB".into());
             }
-            let new_id = hex::encode(rand::random::<[u8; 16]>());
-            tx.execute(
-                "INSERT INTO files VALUES(?1,'outgoing',?2,?3,?4,?5)",
-                params![new_id, name, mime, data, engine::now()],
-            )
-            .map_err(|e| e.to_string())?;
-            tx.execute(
-                "INSERT INTO outgoing_owners VALUES(?1,?2)",
-                params![new_id, account_id],
-            )
-            .map_err(|e| e.to_string())?;
-            result.push(Attachment {
-                id: new_id,
-                name,
-                mime,
-                size: data.len(),
-            });
+            result.push(crate::outgoing::store_file(
+                &tx, account_id, draft_id, name, mime, data,
+            )?);
         }
         tx.commit().map_err(|e| e.to_string())?;
         Ok(result)
@@ -504,8 +491,10 @@ pub fn copy_forward_attachments(
     message_id: String,
     account_id: String,
     ids: Vec<String>,
+    draft_id: String,
 ) -> Result<Vec<Attachment>, String> {
-    copy_attachments_inner(&store, &message_id, &account_id, &ids)
+    crate::outgoing::validate_draft_id(&draft_id)?;
+    copy_attachments_inner(&store, &message_id, &account_id, &ids, Some(&draft_id))
 }
 
 #[cfg(test)]
@@ -696,11 +685,15 @@ mod tests {
         let store = store("imap");
         let m = original(&store);
         db(&store,|d|{d.execute_batch("INSERT INTO files VALUES('incoming','source','report.txt','text/plain',X'68656c6c6f',0);").map_err(|e|e.to_string())}).unwrap();
-        assert!(copy_attachments_inner(&store, &m.id, "b", &["incoming".into()]).is_err());
-        assert!(
-            copy_attachments_inner(&store, &m.id, "a", &["incoming".into(), "missing".into()])
-                .is_err()
-        );
+        assert!(copy_attachments_inner(&store, &m.id, "b", &["incoming".into()], None).is_err());
+        assert!(copy_attachments_inner(
+            &store,
+            &m.id,
+            "a",
+            &["incoming".into(), "missing".into()],
+            None
+        )
+        .is_err());
         assert_eq!(
             db(&store, |d| d
                 .query_row("SELECT count(*) FROM outgoing_owners", [], |r| r
@@ -709,7 +702,7 @@ mod tests {
             .unwrap(),
             0
         );
-        let files = copy_attachments_inner(&store, &m.id, "a", &["incoming".into()]).unwrap();
+        let files = copy_attachments_inner(&store, &m.id, "a", &["incoming".into()], None).unwrap();
         assert_eq!(files[0].name, "report.txt");
         assert_eq!(files[0].size, 5);
         db(&store, |d| engine::remove(d, "source")).unwrap();

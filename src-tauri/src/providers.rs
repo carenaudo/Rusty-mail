@@ -1,7 +1,7 @@
 //! Direct provider transports. All remote data remains untrusted.
 use crate::{
     engine::{self, Mail, ServerConfig},
-    Store,
+    reconcile, Store,
 };
 use base64::{
     engine::general_purpose::{STANDARD, URL_SAFE_NO_PAD},
@@ -221,19 +221,7 @@ pub fn gmail_mail(account_id: &str, email: &str, v: &Value) -> Result<Mail, Stri
         sender = name.trim().trim_matches('"').into();
         address = tail.trim_end_matches('>').into()
     }
-    let folder = if labels.iter().any(|s| s == "TRASH") {
-        "trash"
-    } else if labels.iter().any(|s| s == "SPAM") {
-        "spam"
-    } else if labels.iter().any(|s| s == "INBOX") {
-        "inbox"
-    } else if labels.iter().any(|s| s == "DRAFT") {
-        "drafts"
-    } else if labels.iter().any(|s| s == "SENT") {
-        "sent"
-    } else {
-        "archive"
-    };
+    let folder = gmail_folder(&labels);
     let received = v["internalDate"]
         .as_str()
         .and_then(|s| s.parse::<i64>().ok())
@@ -267,6 +255,19 @@ pub fn gmail_mail(account_id: &str, email: &str, v: &Value) -> Result<Mail, Stri
         ..Default::default()
     })
 }
+
+pub fn gmail_folder(labels: &[String]) -> &str {
+    [
+        ("TRASH", "trash"),
+        ("SPAM", "spam"),
+        ("INBOX", "inbox"),
+        ("DRAFT", "drafts"),
+        ("SENT", "sent"),
+    ]
+    .into_iter()
+    .find_map(|(label, folder)| labels.iter().any(|value| value == label).then_some(folder))
+    .unwrap_or("archive")
+}
 pub async fn sync_google(store: &Store, id: &str) -> Result<usize, String> {
     let count = sync_google_messages(store, id).await?;
     let root = "https://gmail.googleapis.com/gmail/v1/users/me";
@@ -285,6 +286,7 @@ pub async fn sync_google(store: &Store, id: &str) -> Result<usize, String> {
 }
 
 async fn sync_google_messages(store: &Store, id: &str) -> Result<usize, String> {
+    const SCOPE: &str = "gmail";
     let (_, email) = account(store, id)?;
     let root = "https://gmail.googleapis.com/gmail/v1/users/me";
     let mut history = db(store, |d| engine::state(d, id, "history"))?.filter(|s| !s.is_empty());
@@ -300,7 +302,13 @@ async fn sync_google_messages(store: &Store, id: &str) -> Result<usize, String> 
             let value = match api(store, id, Method::GET, &url, None).await {
                 Ok(v) => v,
                 Err(e) if e == "Provider HTTP 404" => {
-                    db(store, |d| engine::checkpoint(d, id, "history", ""))?;
+                    db(store, |d| {
+                        let tx = d.unchecked_transaction().map_err(|e| e.to_string())?;
+                        engine::checkpoint(&tx, id, "history", "")?;
+                        engine::checkpoint(&tx, id, "page", "")?;
+                        reconcile::reset_rebuild(&tx, id, SCOPE)?;
+                        tx.commit().map_err(|e| e.to_string())
+                    })?;
                     history = None;
                     break;
                 }
@@ -364,7 +372,7 @@ async fn sync_google_messages(store: &Store, id: &str) -> Result<usize, String> 
                     put_remote(&tx, m)?;
                 }
                 for remote in &removed {
-                    engine::remove(&tx, &engine::identity(id, remote))?
+                    reconcile::remove_remote(&tx, &engine::identity(id, remote), None)?
                 }
                 engine::checkpoint(&tx, id, "history", &latest)?;
                 tx.commit().map_err(|e| e.to_string())
@@ -372,55 +380,94 @@ async fn sync_google_messages(store: &Store, id: &str) -> Result<usize, String> 
             return Ok(count);
         }
     }
-    let page = db(store, |d| engine::state(d, id, "page"))?.unwrap_or_default();
+    let mut page = db(store, |d| engine::state(d, id, "page"))?.unwrap_or_default();
+    // A pre-v14 bootstrap has no record of which earlier pages were seen.
+    if !db(store, |d| reconcile::rebuilding(d, id, SCOPE))? {
+        page.clear();
+    }
     if page.is_empty() {
         let profile = api(store, id, Method::GET, &format!("{root}/profile"), None).await?;
+        let history = profile["historyId"]
+            .as_str()
+            .filter(|id| !id.is_empty())
+            .ok_or("Gmail omitted its bootstrap checkpoint")?;
         db(store, |d| {
-            engine::checkpoint(
-                d,
-                id,
-                "bootstrap_history",
-                profile["historyId"].as_str().unwrap_or(""),
-            )
+            let tx = d.unchecked_transaction().map_err(|e| e.to_string())?;
+            reconcile::reset_rebuild(&tx, id, SCOPE)?;
+            engine::checkpoint(&tx, id, "page", "")?;
+            engine::checkpoint(&tx, id, "bootstrap_history", history)?;
+            tx.commit().map_err(|e| e.to_string())
         })?;
     }
-    let value = api(
-        store,
-        id,
-        Method::GET,
-        &format!(
-            "{root}/messages?maxResults=100&includeSpamTrash=true&pageToken={}",
-            segment(&page)
+    let mut url = format!("{root}/messages?maxResults=100&includeSpamTrash=true");
+    if !page.is_empty() {
+        url.push_str(&format!("&pageToken={}", segment(&page)));
+    }
+    let value = match api(store, id, Method::GET, &url, None).await {
+        Err(error)
+            if !page.is_empty()
+                && matches!(error.as_str(), "Provider HTTP 400" | "Provider HTTP 404") =>
+        {
+            db(store, |d| {
+                let tx = d.unchecked_transaction().map_err(|e| e.to_string())?;
+                reconcile::reset_rebuild(&tx, id, SCOPE)?;
+                engine::checkpoint(&tx, id, "page", "")?;
+                tx.commit().map_err(|e| e.to_string())
+            })?;
+            return Err("Gmail sync page expired. The next sync will restart the rebuild.".into());
+        }
+        result => result?,
+    };
+    let next = match value.get("nextPageToken") {
+        None => None,
+        Some(token) => Some(
+            token
+                .as_str()
+                .filter(|token| !token.is_empty() && *token != page)
+                .ok_or("Invalid Gmail continuation")?,
         ),
-        None,
-    )
-    .await?;
+    };
+    let items = match value.get("messages") {
+        Some(messages) => messages
+            .as_array()
+            .ok_or("Invalid Gmail message list")?
+            .as_slice(),
+        None if next.is_none() && value["resultSizeEstimate"].as_u64() == Some(0) => &[],
+        None => return Err("Gmail omitted its message list".into()),
+    };
     let mut mails = Vec::new();
-    if let Some(items) = value["messages"].as_array() {
-        for item in items {
-            let remote = item["id"].as_str().ok_or("Invalid Gmail identity")?;
-            let v = api(
-                store,
-                id,
-                Method::GET,
-                &format!("{root}/messages/{}?format=metadata", segment(remote)),
-                None,
-            )
-            .await?;
-            mails.push(gmail_mail(id, &email, &v)?);
+    for item in items {
+        let remote = item["id"].as_str().ok_or("Invalid Gmail identity")?;
+        match api(
+            store,
+            id,
+            Method::GET,
+            &format!("{root}/messages/{}?format=metadata", segment(remote)),
+            None,
+        )
+        .await
+        {
+            Ok(value) if value["id"].as_str() == Some(remote) => {
+                mails.push(gmail_mail(id, &email, &value)?);
+            }
+            Ok(_) => return Err("Provider returned a different message".into()),
+            Err(error) if error == "Provider HTTP 404" => {}
+            Err(error) => return Err(error),
         }
     }
     db(store, |d| {
         let tx = d.unchecked_transaction().map_err(|e| e.to_string())?;
         for m in &mails {
-            put_remote(&tx, m)?
+            put_remote(&tx, m)?;
+            reconcile::observe(&tx, id, SCOPE, &m.id)?;
         }
-        if let Some(page) = value["nextPageToken"].as_str() {
+        if let Some(page) = next {
             engine::checkpoint(&tx, id, "page", page)?;
         } else {
             let h = engine::state(&tx, id, "bootstrap_history")?.unwrap_or_default();
             engine::checkpoint(&tx, id, "history", &h)?;
             engine::checkpoint(&tx, id, "page", "")?;
+            reconcile::finish_rebuild(&tx, id, SCOPE, None)?;
         }
         tx.commit().map_err(|e| e.to_string())
     })?;
@@ -511,7 +558,8 @@ fn save_catalog(
                 if !retained.contains(id.as_str()) {
                     let folder = format!("mailbox:{id}");
                     let mut query = tx
-                        .prepare("SELECT id FROM mail WHERE account_id=?1 AND folder=?2")
+                        .prepare("SELECT m.id FROM mail m LEFT JOIN mutation_base b ON b.id=m.id
+                                  WHERE m.account_id=?1 AND ((b.id IS NULL AND m.folder=?2) OR json_extract(b.state,'$.folder')=?2)")
                         .map_err(|e| e.to_string())?;
                     let messages = query
                         .query_map(params![account, folder], |row| row.get::<_, String>(0))
@@ -519,11 +567,17 @@ fn save_catalog(
                         .collect::<Result<Vec<_>, _>>()
                         .map_err(|e| e.to_string())?;
                     for message in messages {
-                        engine::remove(&tx, &message)?;
+                        reconcile::remove_remote(&tx, &message, Some(&folder))?;
                     }
+                    let scope = format!("delta:custom:{id}");
                     tx.execute(
-                        "DELETE FROM sync_state WHERE account_id=?1 AND key=?2",
-                        params![account, format!("delta:custom:{id}")],
+                        "DELETE FROM sync_state WHERE account_id=?1 AND key IN (?2,?3)",
+                        params![account, scope, format!("rebuild:{scope}")],
+                    )
+                    .map_err(|e| e.to_string())?;
+                    tx.execute(
+                        "DELETE FROM rebuild_seen WHERE account_id=?1 AND scope=?2",
+                        params![account, scope],
                     )
                     .map_err(|e| e.to_string())?;
                 }
@@ -653,10 +707,20 @@ pub async fn sync_graph(store: &Store, id: &str) -> Result<usize, String> {
     );
     for (remote, folder, key) in folders {
         let initial=format!("{root}/mailFolders/{remote}/messages/delta?$select=id,conversationId,subject,from,receivedDateTime,isRead,flag,bodyPreview,parentFolderId&$top=100");
-        let saved = db(store, |d| engine::state(d, id, &key))?.unwrap_or_else(|| initial.clone());
-        let v = match api(store, id, Method::GET, &saved, None).await {
+        let saved = db(store, |d| engine::state(d, id, &key))?;
+        let rebuilding = saved.is_none() || db(store, |d| reconcile::rebuilding(d, id, &key))?;
+        let saved = saved.as_deref().unwrap_or(&initial);
+        let mut reset = false;
+        let v = match api(store, id, Method::GET, saved, None).await {
             Ok(v) => v,
             Err(e) if e == "Provider HTTP 410" || e == "Provider HTTP 404" => {
+                db(store, |d| {
+                    let tx = d.unchecked_transaction().map_err(|e| e.to_string())?;
+                    reconcile::reset_rebuild(&tx, id, &key)?;
+                    engine::checkpoint(&tx, id, &key, &initial)?;
+                    tx.commit().map_err(|e| e.to_string())
+                })?;
+                reset = true;
                 match api(store, id, Method::GET, &initial, None).await {
                     Err(error) if error == "Provider HTTP 404" => continue,
                     result => result?,
@@ -664,32 +728,49 @@ pub async fn sync_graph(store: &Store, id: &str) -> Result<usize, String> {
             }
             Err(e) => return Err(e),
         };
+        let items = v["value"]
+            .as_array()
+            .ok_or("Graph omitted the delta message list")?;
+        let (next, complete) = match v.get("@odata.nextLink") {
+            Some(next) => (next.as_str(), false),
+            None => (v["@odata.deltaLink"].as_str(), true),
+        };
+        let next = next.ok_or("Graph omitted delta checkpoint")?;
+        if !approved_url("microsoft", next) || (!complete && next == saved) {
+            return Err("Blocked Graph continuation URL".into());
+        }
         db(store, |d| {
             let tx = d.unchecked_transaction().map_err(|e| e.to_string())?;
-            if let Some(items) = v["value"].as_array() {
-                for item in items {
-                    let remote_id = item["id"].as_str().ok_or("Invalid Graph identity")?;
-                    if item.get("@removed").is_some() {
-                        let local = engine::identity(id, remote_id);
-                        if let Ok(old) = engine::get(&tx, &local) {
-                            if old.folder == folder {
-                                engine::remove(&tx, &local)?;
-                            }
-                        }
+            let rebuilding = rebuilding || reset;
+            if rebuilding && !reconcile::rebuilding(&tx, id, &key)? {
+                reconcile::reset_rebuild(&tx, id, &key)?;
+            }
+            for item in items {
+                let remote_id = item["id"].as_str().ok_or("Invalid Graph identity")?;
+                if item.get("@removed").is_some() {
+                    let local = engine::identity(id, remote_id);
+                    if rebuilding {
+                        tx.execute(
+                            "DELETE FROM rebuild_seen WHERE account_id=?1 AND scope=?2 AND id=?3",
+                            params![id, key, local],
+                        )
+                        .map_err(|e| e.to_string())?;
                     } else {
-                        put_remote(&tx, &graph_mail(id, &email, &folder, item)?)?;
-                        count += 1;
+                        reconcile::remove_remote(&tx, &local, Some(&folder))?;
                     }
+                } else {
+                    let mail = graph_mail(id, &email, &folder, item)?;
+                    put_remote(&tx, &mail)?;
+                    if rebuilding {
+                        reconcile::observe(&tx, id, &key, &mail.id)?;
+                    }
+                    count += 1;
                 }
             }
-            let next = v["@odata.nextLink"]
-                .as_str()
-                .or(v["@odata.deltaLink"].as_str())
-                .ok_or("Graph omitted delta checkpoint")?;
-            if !approved_url("microsoft", next) {
-                return Err("Blocked Graph continuation URL".into());
-            }
             engine::checkpoint(&tx, id, &key, next)?;
+            if rebuilding && complete {
+                reconcile::finish_rebuild(&tx, id, &key, Some(&folder))?;
+            }
             tx.commit().map_err(|e| e.to_string())
         })?;
     }
@@ -788,17 +869,7 @@ async fn connect_credentials(c: &ServerConfig, password: &str) -> Result<Imap, S
         .map_err(|_| "IMAP login rejected. Check the server's app password and username.".into())
 }
 fn put_remote(d: &rusqlite::Connection, m: &Mail) -> Result<(), String> {
-    let pending:i64=d.query_row("SELECT count(*) FROM jobs WHERE kind='mutation' AND status IN('pending','running','failed') AND json_extract(payload,'$.id')=?1",[&m.id],|r|r.get(0)).map_err(|e|e.to_string())?;
-    if pending == 0 {
-        engine::put(d, m)?
-    } else if let Ok(mut cached) = engine::get(d, &m.id) {
-        // Sync may discover threading metadata while local flags/moves await
-        // submission. Preserve those optimistic changes, but keep identity fresh.
-        cached.provider = m.provider.clone();
-        cached.thread_id = m.thread_id.clone();
-        engine::put(d, &cached)?;
-    }
-    Ok(())
+    reconcile::put_remote(d, m)
 }
 pub async fn sync_imap(store: &Store, id: &str) -> Result<usize, String> {
     sync_imap_mailboxes(store, id, None).await
@@ -870,20 +941,35 @@ async fn sync_imap_mailboxes(
             Err(_) => continue,
         };
         let validity = selected.uid_validity.unwrap_or(0);
+        if validity == 0 {
+            return Err("IMAP omitted UID validity".into());
+        }
         let key = format!("uidvalidity:{mailbox}");
+        let mailbox_prefix = format!("{}:", STANDARD.encode(mailbox.as_bytes()));
+        let remote_prefix = format!("{mailbox_prefix}{validity}:");
         let previous = db(store, |d| engine::state(d, id, &key))?;
         if previous.as_deref() != Some(&validity.to_string()) {
             db(store, |d| {
-                let mut q=d.prepare("SELECT id FROM mail WHERE account_id=?1 AND id IN(SELECT mail_id FROM memberships WHERE mailbox=?2)").map_err(|e|e.to_string())?;
+                let tx = d.unchecked_transaction().map_err(|e| e.to_string())?;
+                let mut q=tx.prepare("SELECT id FROM mail WHERE account_id=?1 AND remote_id GLOB ?2 AND remote_id NOT GLOB ?3").map_err(|e|e.to_string())?;
                 let ids = q
-                    .query_map(params![id, mailbox], |r| r.get::<_, String>(0))
+                    .query_map(
+                        params![
+                            id,
+                            format!("{mailbox_prefix}*"),
+                            format!("{remote_prefix}*")
+                        ],
+                        |r| r.get::<_, String>(0),
+                    )
                     .map_err(|e| e.to_string())?
                     .collect::<Result<Vec<_>, _>>()
                     .map_err(|e| e.to_string())?;
+                drop(q);
                 for mid in ids {
-                    engine::remove(d, &mid)?
+                    reconcile::remove_remote(&tx, &mid, None)?
                 }
-                engine::checkpoint(d, id, &key, &validity.to_string())
+                engine::checkpoint(&tx, id, &key, &validity.to_string())?;
+                tx.commit().map_err(|e| e.to_string())
             })?;
         }
         let folder = if mailbox.eq_ignore_ascii_case("INBOX") {
@@ -917,9 +1003,11 @@ async fn sync_imap_mailboxes(
         let mut uids: Vec<_> = all.into_iter().collect();
         uids.sort_unstable();
         let existing = db(store, |d| {
-            let mut q=d.prepare("SELECT id,remote_id FROM mail WHERE account_id=?1 AND id IN(SELECT mail_id FROM memberships WHERE mailbox=?2)").map_err(|e|e.to_string())?;
+            let mut q = d
+                .prepare("SELECT id,remote_id FROM mail WHERE account_id=?1 AND remote_id GLOB ?2")
+                .map_err(|e| e.to_string())?;
             let rows = q
-                .query_map(params![id, mailbox], |r| {
+                .query_map(params![id, format!("{remote_prefix}*")], |r| {
                     Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))
                 })
                 .map_err(|e| e.to_string())?
@@ -927,7 +1015,6 @@ async fn sync_imap_mailboxes(
                 .map_err(|e| e.to_string())?;
             Ok(rows)
         })?;
-        let remote_prefix = format!("{}:{validity}:", STANDARD.encode(mailbox.as_bytes()));
         let mut known = std::collections::HashSet::new();
         for (mid, remote) in existing {
             if let Some(uid) = remote
@@ -937,7 +1024,7 @@ async fn sync_imap_mailboxes(
                 if uids.binary_search(&uid).is_ok() {
                     known.insert(uid);
                 } else {
-                    db(store, |d| engine::remove(d, &mid))?;
+                    db(store, |d| reconcile::remove_remote(d, &mid, None))?;
                 }
             }
         }
@@ -1160,7 +1247,283 @@ pub async fn move_to_mailbox(
     }
 }
 
-pub async fn mutate(store: &Store, m: &Mail, action: &str) -> Result<(), String> {
+#[derive(Debug)]
+pub struct MutationFailure {
+    pub detail: String,
+    pub uncertain: bool,
+}
+
+impl MutationFailure {
+    fn rejected(detail: impl Into<String>) -> Self {
+        Self {
+            detail: detail.into(),
+            uncertain: false,
+        }
+    }
+    fn unknown(detail: impl Into<String>) -> Self {
+        Self {
+            detail: detail.into(),
+            uncertain: true,
+        }
+    }
+}
+
+pub async fn mutate(
+    store: &Store,
+    mail: &Mail,
+    action: &str,
+) -> Result<Option<Vec<String>>, MutationFailure> {
+    let (provider, _) = account(store, &mail.account_id).map_err(MutationFailure::rejected)?;
+    if provider == "imap" {
+        let dispatched = std::sync::atomic::AtomicBool::new(false);
+        return bounded_imap_mutation(
+            Duration::from_secs(45),
+            &dispatched,
+            mutate_imap(store, mail, action, &dispatched),
+        )
+        .await
+        .map(|()| None);
+    }
+    mutate_http(store, mail, action).await.map_err(|error| {
+        let code = error
+            .strip_prefix("Provider HTTP ")
+            .and_then(|code| code.parse::<u16>().ok());
+        if matches!(
+            error.as_str(),
+            "Mail provider connection failed"
+                | "Provider download interrupted"
+                | "Provider response exceeds download limit"
+                | "Invalid provider response"
+        ) || code.is_some_and(|code| code == 408 || code >= 500)
+        {
+            MutationFailure::unknown(error)
+        } else {
+            MutationFailure::rejected(error)
+        }
+    })
+}
+
+pub async fn refresh_mutation_target(store: &Store, mail: &Mail) -> Result<Option<Mail>, String> {
+    let id = &mail.account_id;
+    let (provider, email) = account(store, id)?;
+    if provider == "imap" {
+        let (mailbox, validity, uid) = imap_location(&mail.remote_id)?;
+        let mut session = imap_connect(store, id).await?;
+        let selected = session
+            .examine(&mailbox)
+            .await
+            .map_err(|_| "Cannot select mailbox")?;
+        let selected_validity = selected.uid_validity.ok_or("IMAP omitted UID validity")?;
+        if selected_validity != validity {
+            return Ok(None);
+        }
+        let flags = imap_confirmed_flags(&mut session, uid).await?;
+        let folder = db(store, |d| {
+            d.query_row(
+                "SELECT special FROM mailboxes WHERE account_id=?1 AND id=?2",
+                params![id, mailbox],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()
+            .map_err(|e| e.to_string())
+        })?;
+        return Ok(flags.map(|(unread, starred)| {
+            let mut observed = mail.clone();
+            if let Some(folder) = folder {
+                observed.folder = folder;
+            }
+            observed.labels = vec![mailbox];
+            observed.unread = unread;
+            observed.starred = starred;
+            observed
+        }));
+    }
+    let remote = segment(&mail.remote_id);
+    let url = match provider.as_str() {
+        "google" => format!("https://gmail.googleapis.com/gmail/v1/users/me/messages/{remote}?format=metadata"),
+        "microsoft" => format!("https://graph.microsoft.com/v1.0/me/messages/{remote}?$select=id,conversationId,subject,from,receivedDateTime,isRead,flag,bodyPreview,parentFolderId"),
+        _ => return Err("Unsupported provider".into()),
+    };
+    let value = match api(store, id, Method::GET, &url, None).await {
+        Err(error) if error == "Provider HTTP 404" => return Ok(None),
+        result => result?,
+    };
+    let observed = if provider == "google" {
+        gmail_mail(id, &email, &value)?
+    } else {
+        let parent = value["parentFolderId"]
+            .as_str()
+            .ok_or("Graph omitted the message folder")?;
+        let mut folder = format!("mailbox:{parent}");
+        for (remote, special) in GRAPH_FOLDERS {
+            let url =
+                format!("https://graph.microsoft.com/v1.0/me/mailFolders/{remote}?$select=id");
+            match api(store, id, Method::GET, &url, None).await {
+                Ok(value) if value["id"].as_str() == Some(parent) => {
+                    folder = special.into();
+                    break;
+                }
+                Ok(_) => {}
+                Err(error) if error == "Provider HTTP 404" => {}
+                Err(error) => return Err(error),
+            }
+        }
+        graph_mail(id, &email, &folder, &value)?
+    };
+    if observed.id != mail.id {
+        return Err("Provider returned a different message".into());
+    }
+    Ok(Some(observed))
+}
+
+async fn imap_confirmed_flags(
+    session: &mut Imap,
+    uid: u32,
+) -> Result<Option<(bool, bool)>, String> {
+    use async_imap::imap_proto::{AttributeValue, Response, Status};
+    let request = session
+        .run_command(format!("UID FETCH {uid} (UID FLAGS)"))
+        .await
+        .map_err(|_| "IMAP fetch failed")?;
+    let mut flags = None;
+    while let Some(response) = session
+        .read_response()
+        .await
+        .map_err(|_| "IMAP fetch interrupted")?
+    {
+        match response.parsed() {
+            Response::Done { tag, status, .. } if tag == &request => {
+                return if *status == Status::Ok {
+                    Ok(flags)
+                } else {
+                    Err("IMAP fetch failed".into())
+                };
+            }
+            Response::Fetch(_, attributes)
+                if attributes
+                    .iter()
+                    .any(|x| matches!(x, AttributeValue::Uid(n) if *n == uid)) =>
+            {
+                if let Some(AttributeValue::Flags(values)) = attributes
+                    .iter()
+                    .find(|x| matches!(x, AttributeValue::Flags(_)))
+                {
+                    let seen = values
+                        .iter()
+                        .any(|flag| flag.eq_ignore_ascii_case("\\Seen"));
+                    let starred = values
+                        .iter()
+                        .any(|flag| flag.eq_ignore_ascii_case("\\Flagged"));
+                    flags = Some((!seen, starred));
+                } else {
+                    return Err("IMAP omitted the message flags".into());
+                }
+            }
+            _ => {}
+        }
+    }
+    Err("IMAP fetch interrupted".into())
+}
+
+async fn bounded_imap_mutation(
+    budget: Duration,
+    dispatched: &std::sync::atomic::AtomicBool,
+    operation: impl std::future::Future<Output = Result<(), MutationFailure>>,
+) -> Result<(), MutationFailure> {
+    match tokio::time::timeout(budget, operation).await {
+        Ok(result) => result,
+        Err(_) if dispatched.load(std::sync::atomic::Ordering::Relaxed) => Err(
+            MutationFailure::unknown("IMAP did not confirm the mailbox action"),
+        ),
+        Err(_) => Err(MutationFailure::rejected(
+            "IMAP timed out before submitting the mailbox action",
+        )),
+    }
+}
+
+async fn mutate_imap(
+    store: &Store,
+    mail: &Mail,
+    action: &str,
+    dispatched: &std::sync::atomic::AtomicBool,
+) -> Result<(), MutationFailure> {
+    let (mailbox, validity, uid) =
+        imap_location(&mail.remote_id).map_err(MutationFailure::rejected)?;
+    let mut session = imap_connect(store, &mail.account_id)
+        .await
+        .map_err(MutationFailure::rejected)?;
+    let selected = session
+        .select(&mailbox)
+        .await
+        .map_err(|_| MutationFailure::rejected("Cannot select mailbox"))?;
+    if selected.uid_validity != Some(validity) {
+        return Err(MutationFailure::rejected(
+            "Mailbox changed; synchronize first",
+        ));
+    }
+    let flag = match action {
+        "read" => Some("+FLAGS.SILENT (\\Seen)"),
+        "unread" => Some("-FLAGS.SILENT (\\Seen)"),
+        "star" => Some("+FLAGS.SILENT (\\Flagged)"),
+        "unstar" => Some("-FLAGS.SILENT (\\Flagged)"),
+        _ => None,
+    };
+    if let Some(flag) = flag {
+        imap_set_flag(&mut session, uid, flag, dispatched).await
+    } else {
+        let target = db(store, |d| {
+            d.query_row(
+                "SELECT id FROM mailboxes WHERE account_id=?1 AND special=?2 LIMIT 1",
+                params![mail.account_id, action],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()
+            .map_err(|e| e.to_string())
+        })
+        .map_err(MutationFailure::rejected)?
+        .ok_or_else(|| {
+            MutationFailure::rejected(
+                "No matching server folder. Configure the server folder before moving mail.",
+            )
+        })?;
+        dispatched.store(true, std::sync::atomic::Ordering::Relaxed);
+        session
+            .uid_mv(uid.to_string(), &target)
+            .await
+            .map_err(imap_mutation_error)
+    }
+    // Drop the session when the command concludes. Waiting for LOGOUT could
+    // turn an acknowledged command into a false timeout.
+}
+
+async fn imap_set_flag<T>(
+    session: &mut async_imap::Session<T>,
+    uid: u32,
+    flag: &str,
+    dispatched: &std::sync::atomic::AtomicBool,
+) -> Result<(), MutationFailure>
+where
+    T: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + std::fmt::Debug + Send,
+{
+    dispatched.store(true, std::sync::atomic::Ordering::Relaxed);
+    // The fetch stream from uid_store does not expose the tagged status.
+    session
+        .run_command_and_check_ok(format!("UID STORE {uid} {flag}"))
+        .await
+        .map_err(imap_mutation_error)
+}
+
+fn imap_mutation_error(error: async_imap::error::Error) -> MutationFailure {
+    use async_imap::error::Error;
+    match error {
+        Error::Bad(_) | Error::No(_) | Error::Validate(_) => {
+            MutationFailure::rejected("IMAP rejected the mailbox action")
+        }
+        _ => MutationFailure::unknown("IMAP did not confirm the mailbox action"),
+    }
+}
+
+async fn mutate_http(store: &Store, m: &Mail, action: &str) -> Result<Option<Vec<String>>, String> {
     let (provider, _) = account(store, &m.account_id)?;
     match provider.as_str() {
         "google" => {
@@ -1175,7 +1538,7 @@ pub async fn mutate(store: &Store, m: &Mail, action: &str) -> Result<(), String>
                 "unstar" => (vec![], vec!["STARRED"]),
                 _ => return Err("Unsupported action".into()),
             };
-            api(
+            let observed = api(
                 store,
                 &m.account_id,
                 Method::POST,
@@ -1186,6 +1549,10 @@ pub async fn mutate(store: &Store, m: &Mail, action: &str) -> Result<(), String>
                 Some(json!({"addLabelIds":add,"removeLabelIds":remove})),
             )
             .await?;
+            if observed["id"].as_str() != Some(&m.remote_id) {
+                return Err("Invalid provider response".into());
+            }
+            return Ok(Some(strings(&observed["labelIds"])));
         }
         "microsoft" => {
             let url = format!(
@@ -1225,44 +1592,9 @@ pub async fn mutate(store: &Store, m: &Mail, action: &str) -> Result<(), String>
                 }
             }
         }
-        "imap" => {
-            let (mailbox, validity, uid) = imap_location(&m.remote_id)?;
-            let mut s = imap_connect(store, &m.account_id).await?;
-            let selected = s
-                .select(&mailbox)
-                .await
-                .map_err(|_| "Cannot select mailbox")?;
-            if selected.uid_validity != Some(validity) {
-                return Err("Mailbox changed; synchronize first".into());
-            }
-            match action {
-                "read" | "unread" | "star" | "unstar" => {
-                    let flag = match action {
-                        "read" => "+FLAGS.SILENT (\\Seen)",
-                        "unread" => "-FLAGS.SILENT (\\Seen)",
-                        "star" => "+FLAGS.SILENT (\\Flagged)",
-                        _ => "-FLAGS.SILENT (\\Flagged)",
-                    };
-                    let _: Vec<_> = s
-                        .uid_store(uid.to_string(), flag)
-                        .await
-                        .map_err(|_| "Flag update failed")?
-                        .try_collect()
-                        .await
-                        .map_err(|_| "Flag update failed")?;
-                }
-                _ => {
-                    let target=db(store,|d|d.query_row("SELECT id FROM mailboxes WHERE account_id=?1 AND special=?2 LIMIT 1",params![m.account_id,action],|r|r.get::<_,String>(0)).optional().map_err(|e|e.to_string()))?.ok_or("No matching server folder. Configure the server folder before moving mail.")?;
-                    s.uid_mv(uid.to_string(), &target).await.map_err(|_| {
-                        "Server must support safe UID MOVE; message was not deleted"
-                    })?;
-                }
-            }
-            s.logout().await.ok();
-        }
         _ => return Err("Unsupported provider".into()),
     }
-    Ok(())
+    Ok(None)
 }
 
 pub fn build_mime(store: &Store, draft: &engine::Draft, job_id: &str) -> Result<Vec<u8>, String> {
@@ -1674,6 +2006,7 @@ mod tests {
         cached.folder = "archive".into();
         cached.unread = false;
         engine::put(&db, &cached).unwrap();
+        reconcile::remember(&db, &cached).unwrap();
         db.execute(
             "INSERT INTO jobs VALUES('job','a','mutation',?1,'pending','',0,0)",
             [json!({"id":cached.id,"action":"archive"}).to_string()],
@@ -1684,7 +2017,77 @@ mod tests {
         assert_eq!(saved.thread_id, "t");
         assert_eq!(saved.provider, "google");
         assert_eq!(saved.folder, "archive");
-        assert!(!saved.unread);
+        assert!(
+            saved.unread,
+            "Only the pending folder change overlays the fetched flags"
+        );
+    }
+
+    #[tokio::test]
+    async fn imap_store_requires_tagged_ack_and_has_a_deadline() {
+        use std::sync::atomic::AtomicBool;
+        use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+        use tokio::net::{TcpListener, TcpStream};
+
+        let dispatched = AtomicBool::new(false);
+        let before = bounded_imap_mutation(
+            Duration::from_millis(5),
+            &dispatched,
+            std::future::pending(),
+        )
+        .await
+        .unwrap_err();
+        assert!(!before.uncertain);
+
+        for (reply, expected) in [
+            (Some("OK flags stored"), Ok(())),
+            (Some("NO read-only"), Err(false)),
+            (None, Err(true)),
+            (Some(""), Err(true)),
+        ] {
+            let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let addr = listener.local_addr().unwrap();
+            let server = tokio::spawn(async move {
+                let (socket, _) = listener.accept().await.unwrap();
+                let mut socket = BufReader::new(socket);
+                socket.write_all(b"* OK fixture ready\r\n").await.unwrap();
+                let mut command = String::new();
+                socket.read_line(&mut command).await.unwrap();
+                let tag = command.split_whitespace().next().unwrap();
+                socket
+                    .write_all(format!("{tag} OK logged in\r\n").as_bytes())
+                    .await
+                    .unwrap();
+                command.clear();
+                socket.read_line(&mut command).await.unwrap();
+                assert!(command.contains("UID STORE 1 +FLAGS.SILENT"));
+                let tag = command.split_whitespace().next().unwrap();
+                match reply {
+                    Some("") => {}
+                    Some(reply) => socket
+                        .write_all(format!("{tag} {reply}\r\n").as_bytes())
+                        .await
+                        .unwrap(),
+                    None => std::future::pending::<()>().await,
+                }
+            });
+            let mut client = async_imap::Client::new(TcpStream::connect(addr).await.unwrap());
+            client.read_response().await.unwrap().unwrap();
+            let mut session = client.login("synthetic", "synthetic").await.unwrap();
+            let dispatched = AtomicBool::new(false);
+            let result = bounded_imap_mutation(
+                Duration::from_millis(200),
+                &dispatched,
+                imap_set_flag(&mut session, 1, "+FLAGS.SILENT (\\Seen)", &dispatched),
+            )
+            .await;
+            assert_eq!(result.map_err(|error| error.uncertain), expected);
+            if reply.is_none() {
+                server.abort();
+            } else {
+                server.await.unwrap();
+            }
+        }
     }
 
     #[tokio::test]

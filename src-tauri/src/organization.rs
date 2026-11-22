@@ -1,4 +1,4 @@
-use crate::{engine, live::Runtime, providers, Store};
+use crate::{engine, live::Runtime, providers, reconcile, Store};
 use rusqlite::{params, OptionalExtension};
 use serde::Serialize;
 use std::{sync::Arc, time::Duration};
@@ -75,7 +75,7 @@ pub async fn organize_mail(
             }
             let conflict: Option<String> = db.query_row(
                 "SELECT status FROM jobs WHERE kind='mutation'
-                 AND json_extract(payload,'$.id')=?1 AND status IN ('pending','running','failed')
+                 AND json_extract(payload,'$.id')=?1 AND status IN ('pending','running','failed','uncertain')
                  AND (?2 OR json_extract(payload,'$.action') NOT IN ('read','unread','star','unstar'))
                  ORDER BY (status='failed') DESC LIMIT 1",
                 params![id, enabled.is_none()],
@@ -101,12 +101,16 @@ pub async fn organize_mail(
         if let Some(enabled) = enabled {
             providers::set_gmail_label(&store, &message, &target, enabled).await?;
             providers::db(&store, |db| {
-                let mut current = engine::get(db, &id)?;
+                let tx = db
+                    .unchecked_transaction()
+                    .map_err(|error| error.to_string())?;
+                let mut current = reconcile::mutation_target(&tx, &id)?;
                 current.labels.retain(|label| label != &target);
                 if enabled {
                     current.labels.push(target.clone());
                 }
-                engine::put(db, &current)
+                reconcile::put_remote(&tx, &current)?;
+                tx.commit().map_err(|error| error.to_string())
             })
         } else {
             if message.folder == format!("mailbox:{target}") {
@@ -118,7 +122,7 @@ pub async fn organize_mail(
                     .unchecked_transaction()
                     .map_err(|error| error.to_string())?;
                 match moved {
-                    Some(moved) if moved.id == id => engine::put(&tx, &moved)?,
+                    Some(moved) if moved.id == id => reconcile::put_remote(&tx, &moved)?,
                     Some(moved) => {
                         engine::put(&tx, &moved)?;
                         engine::remove(&tx, &id)?;
