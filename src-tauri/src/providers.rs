@@ -12,6 +12,15 @@ use reqwest::{Client, Method};
 use rusqlite::{params, OptionalExtension};
 use serde_json::{json, Value};
 use std::{sync::OnceLock, time::Duration};
+use time::{format_description::well_known::Rfc3339, OffsetDateTime};
+
+fn received_date(received: i64) -> String {
+    OffsetDateTime::from_unix_timestamp(received)
+        .ok()
+        .and_then(|date| date.format(&Rfc3339).ok())
+        .unwrap_or_default()
+}
+
 pub fn segment(s: &str) -> String {
     percent_encoding::utf8_percent_encode(s, percent_encoding::NON_ALPHANUMERIC).to_string()
 }
@@ -247,9 +256,7 @@ pub fn gmail_mail(account_id: &str, email: &str, v: &Value) -> Result<Mail, Stri
         unread: labels.iter().any(|s| s == "UNREAD"),
         starred: labels.iter().any(|s| s == "STARRED"),
         folder: folder.into(),
-        date: chrono::DateTime::from_timestamp(received, 0)
-            .map(|d| d.to_rfc3339())
-            .unwrap_or_default(),
+        date: received_date(received),
         received,
         labels,
         ..Default::default()
@@ -480,8 +487,8 @@ pub fn graph_mail(account_id: &str, email: &str, folder: &str, v: &Value) -> Res
     let remote = v["id"].as_str().ok_or("Missing Graph identity")?;
     let received = v["receivedDateTime"]
         .as_str()
-        .and_then(|s| chrono::DateTime::parse_from_rfc3339(s).ok())
-        .map(|d| d.timestamp())
+        .and_then(|s| OffsetDateTime::parse(s, &Rfc3339).ok())
+        .map(OffsetDateTime::unix_timestamp)
         .unwrap_or(0);
     Ok(Mail {
         id: engine::identity(account_id, remote),
@@ -1097,9 +1104,7 @@ async fn sync_imap_mailboxes(
                         .and_then(|p| p.subject())
                         .unwrap_or("(No subject)")
                         .into(),
-                    date: chrono::DateTime::from_timestamp(received, 0)
-                        .map(|d| d.to_rfc3339())
-                        .unwrap_or_default(),
+                    date: received_date(received),
                     received,
                     category: "people".into(),
                     unread: !flags.iter().any(|f| f == "Seen"),

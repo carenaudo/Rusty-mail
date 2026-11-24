@@ -179,9 +179,9 @@ fn mailbox_benchmark() {
             "Only reuse a verified synthetic fixture"
         );
         assert_eq!(
-            db.query_row("SELECT count(*) FROM mail", [], |r| r.get::<_, usize>(0))
+            db.query_row("SELECT count(*) FROM mail", [], |r| r.get::<_, i64>(0))
                 .unwrap(),
-            count
+            count as i64
         );
     } else {
         let tx = db.unchecked_transaction().unwrap();
@@ -293,7 +293,7 @@ fn mailbox_benchmark() {
         v.sort_by(f64::total_cmp);
         v[(v.len() * 95 / 100).min(v.len() - 1)]
     }
-    let result = serde_json::json!({"messages":count,"downloaded_bodies":count.min(20_000),"accounts":3,"build":"debug","encrypted":true,"schema_version":engine::SCHEMA_VERSION,"engine_source_sha256":hex::encode(sha2::Sha256::digest(include_bytes!("engine.rs"))),"measured_utc":chrono::Utc::now().to_rfc3339(),"fixture_reused":reused,"fixture_retained":persistent,"samples":50,"broad_and_deep_samples":5,"ingest_ms":ingest,"page_p95_ms":p95(&mut page),"search_p95_ms":p95(&mut search),"read_p95_ms":p95(&mut read),"broad_search_p95_ms":p95(&mut broad_search),"deep_offset_page_p95_ms":p95(&mut deep_page),"deep_cursor_page_p95_ms":p95(&mut cursor_page),"broad_search_with_snooze_p95_ms":p95(&mut snoozed_search)});
+    let result = serde_json::json!({"messages":count,"downloaded_bodies":count.min(20_000),"accounts":3,"build":"debug","encrypted":true,"schema_version":engine::SCHEMA_VERSION,"engine_source_sha256":hex::encode(sha2::Sha256::digest(include_bytes!("engine.rs"))),"measured_utc":engine::measured_utc(),"fixture_reused":reused,"fixture_retained":persistent,"samples":50,"broad_and_deep_samples":5,"ingest_ms":ingest,"page_p95_ms":p95(&mut page),"search_p95_ms":p95(&mut search),"read_p95_ms":p95(&mut read),"broad_search_p95_ms":p95(&mut broad_search),"deep_offset_page_p95_ms":p95(&mut deep_page),"deep_cursor_page_p95_ms":p95(&mut cursor_page),"broad_search_with_snooze_p95_ms":p95(&mut snoozed_search)});
     println!("{result}");
     let target = std::env::var("RUSTYMAIL_BENCH_OUTPUT")
         .unwrap_or_else(|_| format!("benchmark-{count}.json"));
@@ -378,7 +378,7 @@ fn synthetic_soak() {
         iterations += 1;
         let elapsed = start.elapsed().as_secs();
         let complete = elapsed >= seconds;
-        let report = serde_json::json!({"status":if complete{"complete"}else{"running"},"synthetic_only":true,"messages":count,"accounts":3,"requested_seconds":seconds,"elapsed_seconds":elapsed,"iterations":iterations,"updated_utc":chrono::Utc::now().to_rfc3339()});
+        let report = serde_json::json!({"status":if complete{"complete"}else{"running"},"synthetic_only":true,"messages":count,"accounts":3,"requested_seconds":seconds,"elapsed_seconds":elapsed,"iterations":iterations,"updated_utc":engine::measured_utc()});
         std::fs::write(&output, serde_json::to_vec_pretty(&report).unwrap()).unwrap();
         if complete {
             break;

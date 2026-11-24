@@ -1,32 +1,41 @@
 # Rusty Mail
 
-Rusty Mail is a simple Windows email client for reading mail and writing replies. It’s an early-stage project built with Rust, Tauri, and Svelte. **Most of the code was written with AI assistance.**
+Rusty Mail is an early-stage Windows email client built with Rust, Tauri, and Svelte. It brings multiple inboxes into one conversation view, with search, drafts, and an encrypted local mail cache. Most of the code was written with AI assistance.
 
-## What it tries to be
+**New to Rusty Mail?** Start with the [illustrated user manual](docs/USER-MANUAL.md).
 
-1. **Read mail.** Open a conversation and choose formatted or plain-text view.
-2. **Write a reply.** Reply to the selected message or save your reply as a draft.
-3. **Choose what to open.** The reader asks for confirmation before loading images, saving attachments, or following links.
+![Light-mode inbox with downloaded-mail search, a conversation list, and a formatted message](docs/screenshots/inbox-and-reader.png)
 
-## Screenshots
+## What you can do
 
-The desktop interface shown with synthetic mail.
+- Connect Gmail, Microsoft mail, or an IMAP/SMTP account such as iCloud or Fastmail. [Provider setup](docs/PROVIDER-REGISTRATION.md)
+- Search downloaded mail, narrow results by unread status, sender, or date, and organize messages with stars, archive, and local snooze.
+- Reply to a specific message in a conversation, save a draft, and cancel a queued send during the 10-second delay.
+- Read formatted email or plain text, with confirmation before loading images, saving attachments, or opening external links.
 
-![Rusty Mail inbox with search, a conversation list, and the formatted-message reader](docs/screenshots/inbox-and-reader.png)
+![Light-mode reply composer with an editable recipient, subject, message, and draft controls](docs/screenshots/compose-reply.png)
 
-![Formatted email with blocked images and a confirmation dialog for loading remote images](docs/screenshots/image-confirmation.png)
+Both screenshots show synthetic mail.
 
 ## Run on Windows
 
-Install Node.js, Rust, the Microsoft C++ build tools, WebView2, and native Strawberry Perl for the default OpenSSL build.
+If you have the Windows x64 release bundle, extract the ZIP and run `rusty-mail.exe`, or run the NSIS setup executable. Rusty Mail uses Microsoft Edge WebView2.
+
+To build from source, install Node.js, Rust, the Microsoft C++ build tools, WebView2, and native Strawberry Perl for vendored OpenSSL. Run these commands from the repository root.
 
 ```powershell
 npm ci
 npm run tauri dev
 ```
 
-`npm run dev` opens the sample-only browser preview. For desktop account setup, see the [provider registration guide](docs/PROVIDER-REGISTRATION.md). Validation has focused on synthetic mail and local test servers. See [testing and known limits](docs/TESTING.md).
+`npm run dev` runs the sample-only browser preview. Source and development builds need a desktop OAuth registration for Gmail and Microsoft sign-in. [Provider setup](docs/PROVIDER-REGISTRATION.md)
+
+## Project documentation
+
+- [Testing and known limits](docs/TESTING.md)
+- [Security and local storage](docs/SECURITY.md)
+- [Signed release builds](docs/SIGNED-RELEASES.md)
 
 ## License
 
-Rusty Mail’s original code and assets are licensed under the [MIT License](LICENSE). Dependencies have their own licenses. See [third-party notices](THIRD_PARTY_NOTICES.md).
+Rusty Mail’s original code and assets use the MIT License. Dependencies have their own licenses. [MIT License](LICENSE) · [Third-party notices](THIRD_PARTY_NOTICES.md)

@@ -3,7 +3,10 @@ targets = ["x86_64-pc-windows-msvc"]
 all-features = true
 
 [advisories]
-ignore = []
+ignore = [
+ { id = "RUSTSEC-2026-0441", reason = "Unmaintained only. async-imap 0.12.0 uses pin-utils for local pinning. Upstream removed it after 0.12.0; remove this exception when that change ships." },
+ { id = "RUSTSEC-2026-0543", reason = "Unmaintained only. Chrono remains a required transitive dependency of the published async-imap; remove this exception when async-imap no longer requires it." },
+]
 
 [licenses]
 allow = ["MIT", "Apache-2.0", "Apache-2.0 WITH LLVM-exception", "BSD-2-Clause", "BSD-3-Clause", "ISC", "Zlib", "OpenSSL", "Unicode-3.0", "Unicode-DFS-2016", "CC0-1.0", "Unlicense", "0BSD", "BSL-1.0", "CDLA-Permissive-2.0"]
@@ -14,6 +17,8 @@ exceptions = [
  { crate = "dtoa-short", allow = ["MPL-2.0"] },
  { crate = "option-ext", allow = ["MPL-2.0"] },
  { crate = "selectors", allow = ["MPL-2.0"] },
+ # SQLCipher's source archive also contains SQLite's blessing and libtomcrypt's WTFPL notice.
+ { crate = "sqlcipher-src@=420.0.0", allow = ["blessing", "WTFPL"] },
 ]
 
 [bans]

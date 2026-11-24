@@ -94,7 +94,7 @@ pub fn save(store: &Store, id: &str, draft: &Draft) -> Result<(), String> {
              ON CONFLICT(id) DO UPDATE SET account_id=excluded.account_id,payload=excluded.payload,updated=excluded.updated
              WHERE saved_drafts.queued_job_id IS NULL",
             params![id, draft.account_id, serde_json::to_string(draft).map_err(|e| e.to_string())?,
-                chrono::Utc::now().timestamp_millis()],
+                (time::OffsetDateTime::now_utc().unix_timestamp_nanos() / 1_000_000) as i64],
         ).map_err(|e| e.to_string())?;
         if changed == 0 {
             return Err("This draft is already queued for sending".into());

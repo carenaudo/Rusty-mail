@@ -13,6 +13,14 @@ pub const MAX_ATTACHMENTS: usize = 256;
 pub const MAX_HTML: usize = 1_000_000;
 pub const SCHEMA_VERSION: i64 = 15;
 pub const BODY_FORMAT_VERSION: u8 = 2;
+
+#[cfg(test)]
+pub fn measured_utc() -> String {
+    time::OffsetDateTime::now_utc()
+        .format(&time::format_description::well_known::Rfc3339)
+        .expect("current UTC time is representable as RFC 3339")
+}
+
 pub fn now() -> i64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)

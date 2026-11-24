@@ -25,9 +25,9 @@ fn conversation_performance() {
     let db = open_store(&path, &"ba".repeat(32)).unwrap();
     engine::migrate(&db).unwrap();
     assert_eq!(
-        db.query_row("SELECT count(*) FROM mail", [], |r| r.get::<_, usize>(0))
+        db.query_row("SELECT count(*) FROM mail", [], |r| r.get::<_, i64>(0))
             .unwrap(),
-        count
+        count as i64
     );
     assert_eq!(
         engine::state(&db, "synthetic-benchmark", "fixture-v1")
@@ -41,7 +41,7 @@ fn conversation_performance() {
     {
         let tx = db.unchecked_transaction().unwrap();
         let mut q=tx.prepare("UPDATE mail SET payload=json_set(payload,'$.provider','google','$.thread_id',?1,'$.conversation_key',?2,'$.html_body',CASE WHEN received<20000 THEN '<p>Cached <strong>formatted</strong> message.</p>' ELSE '' END,'$.body_format_version',1) WHERE received>=?3 AND received<?4").unwrap();
-        for i in 0..count.div_ceil(30) {
+        for i in 0..count.div_ceil(30) as i64 {
             let thread = format!("perf-{i}");
             let key = format!("native:{}", engine::identity("google", &thread));
             q.execute(rusqlite::params![thread, key, i * 30, (i + 1) * 30])
@@ -179,7 +179,7 @@ fn conversation_performance() {
     db.execute_batch("ROLLBACK TO unrelated_snooze; RELEASE unrelated_snooze")
         .unwrap();
     let label = std::env::var("RUSTYMAIL_PERF_LABEL").unwrap_or("current".into());
-    let result = serde_json::json!({"label":label,"messages":count,"build":if cfg!(debug_assertions){"debug"}else{"release"},"encrypted":true,"fixture":"30 messages per provider thread across 3 accounts; 20k cached bodies and HTML","engine_sha256":hex::encode(Sha256::digest(include_bytes!("engine.rs"))),"measured_utc":chrono::Utc::now().to_rfc3339(),"timings":timings});
+    let result = serde_json::json!({"label":label,"messages":count,"build":if cfg!(debug_assertions){"debug"}else{"release"},"encrypted":true,"fixture":"30 messages per provider thread across 3 accounts; 20k cached bodies and HTML","engine_sha256":hex::encode(Sha256::digest(include_bytes!("engine.rs"))),"measured_utc":engine::measured_utc(),"timings":timings});
     let output = root.join(format!(
         "reports/performance/conversations-{label}-{count}.json"
     ));

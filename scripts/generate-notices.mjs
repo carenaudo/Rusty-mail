@@ -15,7 +15,11 @@ const records=[];
 function licenses(directory){const result=[];if(!existsSync(directory))return result;for(const item of readdirSync(directory,{withFileTypes:true})){if(item.isFile()&&/^(licen[cs]e|copying|notice|unlicense|copyright)([._-]|$)/i.test(item.name)&&statSync(join(directory,item.name)).size<2*1024*1024){result.push({name:item.name,text:readFileSync(join(directory,item.name),'utf8')})}if(item.isDirectory()&&/^licenses?$/i.test(item.name)){for(const file of readdirSync(join(directory,item.name),{withFileTypes:true})){const path=join(directory,item.name,file.name);if(file.isFile()&&statSync(path).size<2*1024*1024)result.push({name:`${item.name}/${file.name}`,text:readFileSync(path,'utf8')})}}}return result;}
 for(const id of [...included].sort()){const pkg=packages.get(id);if(!pkg||pkg.id===metadata.resolve.root)continue;const directory=dirname(pkg.manifest_path);const texts=licenses(directory);if(pkg.license_file&&existsSync(join(directory,pkg.license_file))&&!texts.some(t=>t.name===pkg.license_file)){texts.push({name:pkg.license_file,text:readFileSync(join(directory,pkg.license_file),'utf8')})}
  records.push({ecosystem:'Rust',name:pkg.name,version:pkg.version,license:pkg.license??'See license files',source:`https://crates.io/api/v1/crates/${pkg.name}/${pkg.version}/download`,texts});
- if(pkg.name==='libsqlite3-sys'){records.push({ecosystem:'Bundled C',name:'SQLCipher',version:`vendored by ${pkg.name} ${pkg.version}`,license:'BSD-3-Clause',source:pkg.repository,texts:licenses(join(directory,'sqlcipher'))});}
+ if(pkg.name==='sqlcipher-src'){
+  const bundled=licenses(join(directory,'sqlcipher'));
+  if(!bundled.some(t=>t.name==='LICENSE-sqlcipher')||!bundled.some(t=>t.name==='LICENSE-libtomcrypt'))throw Error('Missing SQLCipher source archive notices');
+  texts.push(...bundled.map(t=>({...t,name:`sqlcipher/${t.name}`})));
+ }
  if(pkg.name==='openssl-src'){records.push({ecosystem:'Bundled C',name:'OpenSSL',version:`vendored by ${pkg.name} ${pkg.version}`,license:'Apache-2.0',source:'https://github.com/openssl/openssl',texts:licenses(join(directory,'openssl'))});}
 }
 // Include code actually emitted by Vite, rather than compiler-only npm dependencies.

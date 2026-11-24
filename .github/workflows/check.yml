@@ -7,6 +7,12 @@ jobs:
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
+      - name: Check for tracked local files
+        shell: pwsh
+        run: |
+          $tracked = @(git ls-files --cached --ignored --exclude-from=.gitignore)
+          if ($LASTEXITCODE -ne 0) { throw 'Could not check tracked paths' }
+          if ($tracked.Count) { throw 'The index contains files covered by .gitignore. Remove them from Git.' }
       - uses: actions/setup-node@v4
         with:
           node-version: 22

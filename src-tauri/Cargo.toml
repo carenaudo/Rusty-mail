@@ -16,7 +16,7 @@ tauri-plugin-single-instance = "2"
 tauri-plugin-updater = { version = "2", optional = true }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-rusqlite = { version = "0.32", features = ["bundled-sqlcipher-vendored-openssl", "functions"] }
+rusqlite = { version = "0.43", default-features = false, features = ["bundled-sqlcipher-vendored-openssl", "cache", "functions"] }
 keyring = { version = "3", features = ["windows-native"] }
 rand = "0.8"
 hex = "0.4"
@@ -29,11 +29,11 @@ async-imap = { version = "0.12", default-features = false, features = ["runtime-
 tokio-native-tls = "0.3"
 native-tls = "0.2"
 futures-util = "0.3"
-chrono = { version = "0.4", default-features = false, features = ["clock"] }
+time = { version = "0.3", features = ["formatting", "parsing"] }
 percent-encoding = "2"
 mail-parser = "1"
 imagesize = "0.15"
-lettre = { version = "0.11", default-features = false, features = ["builder", "smtp-transport", "native-tls"] }
+lettre = { version = "0.11.24", default-features = false, features = ["builder", "smtp-transport", "native-tls"] }
 rfd = "0.15"
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
 
