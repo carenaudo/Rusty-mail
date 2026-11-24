@@ -1,5 +1,7 @@
 # Rusty Mail
 
+> **Personal project:** Rusty Mail is my personal project, built to keep email simple and focused without adding lots of features unrelated to email. I shape it to suit my preferences and develop it with ChatGPT Codex. I also conduct security audits with Codex and other AI-assisted tools, including Copilot, Claude Code, and Antigravity. If you're looking for an established email client, consider Thunderbird, Betterbird, Outlook, or another option.
+
 Rusty Mail is an early-stage Windows email client built with Rust, Tauri, and Svelte. It brings multiple inboxes into one conversation view, with search, drafts, and an encrypted local mail cache. Most of the code was written with AI assistance.
 
 **New to Rusty Mail?** Start with the [illustrated user manual](docs/USER-MANUAL.md).
