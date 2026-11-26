@@ -10,7 +10,7 @@
  type Confirmation={kind:ImageKind;sources:string[]}|{kind:'link';url:string};
  const maxImageBytes=4*1024*1024;
  let {id,html,text}:{id:string;html:string;text:string}=$props();
- let plain=$state(false),larger=$state(false);
+ let plain=$state(false),larger=$state(false),linksEnabled=$state(false);
  let images=$state.raw<Record<string,string>>({});
  let attempted=$state.raw<ReadonlySet<ImageKind>>(new Set());
  let loading=$state<ImageKind|null>(null);
@@ -26,12 +26,13 @@
  const loaded=$derived(Object.keys(images).length);
  const failed=$derived((attempted.has('embedded')?missingEmbedded.length:0)
   +(attempted.has('remote')?missingRemote.length:0));
- const documentHtml=$derived(mailDocument(prepared,images,t('Image blocked')));
+ const documentHtml=$derived(mailDocument(prepared,images,t('Image blocked'),linksEnabled));
 
  $effect(()=>{
   id;html;
   plain=false;
   larger=false;
+  linksEnabled=false;
   linkError='';
   confirmation=null;
   untrack(hideImages);
@@ -79,8 +80,22 @@
  }
  function changeFormat(){
   plain=!plain;
+  linksEnabled=false;
   confirmation=null;
   hideImages();
+ }
+ function handleFrameLoad(event:Event){
+  if(!linksEnabled)return;
+  const frame=event.currentTarget as HTMLIFrameElement;
+  const links=prepared.links;
+  frame.contentDocument?.addEventListener('click',event=>{
+   const anchor=(event.target as Element|null)?.closest?.('a[data-mail-link][href]');
+   if(!anchor)return;
+   event.preventDefault();
+   if(!frame.isConnected||!linksEnabled)return;
+   const link=links[Number(anchor.getAttribute('data-mail-link'))];
+   if(link)confirmation={kind:'link',url:link.url};
+  });
  }
  function confirmContent(){
   const pending=confirmation;
@@ -101,6 +116,9 @@
   <span>{plain?t('Plain text'):t('Formatted message')}</span>
   <button onclick={changeFormat}>{plain?t('Show formatting'):t('View plain text')}</button>
   {#if !plain}<button aria-pressed={larger} onclick={()=>larger=!larger}>{t("Larger view")}</button>{/if}
+  {#if !plain&&prepared.links.length}
+   <button aria-pressed={linksEnabled} onclick={()=>linksEnabled=!linksEnabled}>{t('Enable links in message')}</button>
+  {/if}
  </div>
  {#if plain}
   <div class="body">{text}</div>
@@ -130,16 +148,18 @@
     {#if prepared.skippedImages}<small>{t(prepared.skippedImages===1?'{count} image is unavailable because of the format or image limit.':'{count} images are unavailable because of the format or image limit.',{count:prepared.skippedImages})}</small>{/if}
    </div>
   {/if}
-  <iframe class="mail-html-frame" class:larger title={t("Formatted message")} sandbox="" referrerpolicy="no-referrer" srcdoc={documentHtml}></iframe>
+  {#key linksEnabled}
+   <iframe class="mail-html-frame" class:larger title={t("Formatted message")} sandbox={linksEnabled?'allow-same-origin':''} referrerpolicy="no-referrer" srcdoc={documentHtml} onload={handleFrameLoad}></iframe>
+  {/key}
   {#if prepared.links.length}
    <details class="mail-links">
     <summary>{t('Links in this message ({count})',{count:prepared.links.length})}</summary>
     {#each prepared.links as link,i}
      <button onclick={()=>confirmation={kind:'link',url:link.url}}><span>{i+1}. {link.label}</span><small>{link.url}</small></button>
     {/each}
-    {#if linkError}<p role="status">{linkError}</p>{/if}
    </details>
   {/if}
+  {#if linkError}<p role="status">{linkError}</p>{/if}
  {/if}
 </div>
 {#if confirmation}

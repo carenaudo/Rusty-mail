@@ -11,6 +11,7 @@ use std::{
 
 const MAX_IMAGE: usize = 1024 * 1024;
 const MAX_TOTAL: usize = 4 * 1024 * 1024;
+const MAX_REDIRECTS: usize = 3;
 pub const MAX_IMAGES: usize = 12;
 #[derive(Serialize)]
 pub struct ImageResult {
@@ -106,8 +107,7 @@ fn image_data(bytes: &[u8]) -> Result<String, String> {
     }
     Ok(format!("data:{mime};base64,{}", STANDARD.encode(bytes)))
 }
-async fn download(source: &str) -> Result<Vec<u8>, String> {
-    let url = remote_url(source)?;
+async fn request_image(url: reqwest::Url) -> Result<reqwest::Response, String> {
     let host = url
         .host_str()
         .ok_or("Missing image host")?
@@ -130,12 +130,37 @@ async fn download(source: &str) -> Result<Vec<u8>, String> {
         .resolve_to_addrs(host, &addresses)
         .build()
         .map_err(|_| "Image connection unavailable")?;
-    let mut response = client
+    client
         .get(url)
         .header("Accept", "image/png,image/jpeg,image/gif,image/webp")
         .send()
         .await
-        .map_err(|_| "Image download failed")?;
+        .map_err(|_| "Image download failed".into())
+}
+
+async fn download(source: &str) -> Result<Vec<u8>, String> {
+    let mut url = remote_url(source)?;
+    for hop in 0..=MAX_REDIRECTS {
+        let response = request_image(url.clone()).await?;
+        if !matches!(response.status().as_u16(), 301 | 302 | 303 | 307 | 308) {
+            return read_image(response).await;
+        }
+        if hop == MAX_REDIRECTS {
+            break;
+        }
+        let location = response
+            .headers()
+            .get(reqwest::header::LOCATION)
+            .and_then(|value| value.to_str().ok())
+            .filter(|value| !value.chars().any(char::is_control))
+            .ok_or("Invalid image redirect")?;
+        let next = url.join(location).map_err(|_| "Invalid image redirect")?;
+        url = remote_url(next.as_str())?;
+    }
+    Err("Too many image redirects".into())
+}
+
+async fn read_image(mut response: reqwest::Response) -> Result<Vec<u8>, String> {
     if !response.status().is_success() {
         return Err("Image response rejected".into());
     }
@@ -217,35 +242,34 @@ pub async fn load_images_inner(
             Ok(None)
         }
     })?;
-    let work = async {
-        let parsed = raw
-            .as_deref()
-            .and_then(|raw| mail_parser::MessageParser::default().parse(raw));
-        let mut results = Vec::new();
-        let mut total = 0;
-        for source in sources {
-            let bytes = if source.starts_with("https:") {
-                download(&source).await
-            } else {
-                local_image(&source, parsed.as_ref())
-            };
-            let data_url = match bytes {
-                Ok(bytes) if total + bytes.len() <= MAX_TOTAL => {
-                    let data = image_data(&bytes).ok();
-                    if data.is_some() {
-                        total += bytes.len();
-                    }
-                    data
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(25);
+    let parsed = raw
+        .as_deref()
+        .and_then(|raw| mail_parser::MessageParser::default().parse(raw));
+    let mut results = Vec::new();
+    let mut total = 0;
+    for source in sources {
+        let bytes = if source.starts_with("https:") {
+            let image_deadline = deadline.min(tokio::time::Instant::now() + Duration::from_secs(9));
+            tokio::time::timeout_at(image_deadline, download(&source))
+                .await
+                .unwrap_or_else(|_| Err("Image download timed out".into()))
+        } else {
+            local_image(&source, parsed.as_ref())
+        };
+        let data_url = match bytes {
+            Ok(bytes) if total + bytes.len() <= MAX_TOTAL => {
+                let data = image_data(&bytes).ok();
+                if data.is_some() {
+                    total += bytes.len();
                 }
-                _ => None,
-            };
-            results.push(ImageResult { source, data_url });
-        }
-        results
-    };
-    tokio::time::timeout(Duration::from_secs(25), work)
-        .await
-        .map_err(|_| "Images took too long to load; try again".into())
+                data
+            }
+            _ => None,
+        };
+        results.push(ImageResult { source, data_url });
+    }
+    Ok(results)
 }
 #[tauri::command]
 pub async fn load_message_images(

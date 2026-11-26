@@ -1,7 +1,7 @@
 import DOMPurify from 'dompurify';
 
 const tags=['p','div','span','br','hr','strong','b','em','i','u','s','del','small','sub','sup','blockquote','pre','code','ul','ol','li','dl','dt','dd','h1','h2','h3','h4','h5','h6','table','thead','tbody','tfoot','tr','td','th','caption','colgroup','col','a','img'];
-const attrs=['alt','title','width','height','colspan','rowspan','dir','lang','scope','style','data-mail-image'];
+const attrs=['alt','title','width','height','colspan','rowspan','dir','lang','scope','style','data-mail-image','data-mail-link'];
 export const MAX_IMAGES=12;
 export type PreparedMail={html:string;images:string[];imageCount:number;skippedImages:number;links:{label:string;url:string}[]};
 const config={ALLOWED_TAGS:tags,ALLOWED_ATTR:attrs,ALLOW_DATA_ATTR:false,ALLOW_ARIA_ATTR:false,FORBID_TAGS:['svg','math','style','script','template'],RETURN_DOM_FRAGMENT:true as const};
@@ -56,9 +56,10 @@ export function prepareMail(html:string):PreparedMail {
    if(source){imageIndex=images.indexOf(source);if(imageIndex<0&&images.length<MAX_IMAGES){imageIndex=images.length;images.push(source)}}
    if(imageIndex<0)skippedImages++;
   }
-  if(tag==='a') {
-   const url=linkUrl(el.getAttribute('href')??'');
-   if(url&&links.length<30){links.push({label:el.textContent?.trim().slice(0,100)||url,url});el.append(document.createTextNode(` [${links.length}]`))}
+  const url=tag==='a'?linkUrl(el.getAttribute('href')??''):null;
+  if(url&&links.length<30){
+   retained.set('data-mail-link',String(links.length));
+   links.push({label:el.textContent?.trim().slice(0,100)||el.querySelector('img')?.getAttribute('alt')?.trim().slice(0,100)||url,url});
   }
   for(const attr of Array.from(el.attributes))el.removeAttribute(attr.name);
   for(const [name,value]of retained)el.setAttribute(name,value);
@@ -69,7 +70,7 @@ export function prepareMail(html:string):PreparedMail {
  const holder=document.createElement('div');holder.append(clean);
  return {html:holder.innerHTML,images,imageCount,skippedImages,links};
 }
-export function mailDocument(prepared:PreparedMail,images:Record<string,string>={},blockedLabel='Image blocked'):string {
+export function mailDocument(prepared:PreparedMail,images:Record<string,string>={},blockedLabel='Image blocked',linksEnabled=false):string {
  const template=document.createElement('template');template.innerHTML=prepared.html;
  for(const node of Array.from(template.content.querySelectorAll('img'))) {
   const index=node.getAttribute('data-mail-image');
@@ -85,6 +86,9 @@ export function mailDocument(prepared:PreparedMail,images:Record<string,string>=
   }
  }
  const clean=DOMPurify.sanitize(template.content,{...config,ALLOWED_ATTR:[...attrs,'src','referrerpolicy','class']});
+ // The parent handles clicks by index. Even a native browser gesture cannot
+ // navigate to a sender-supplied destination from inside this frame.
+ if(linksEnabled)clean.querySelectorAll('a[data-mail-link]').forEach(anchor=>anchor.setAttribute('href','about:blank'));
  const holder=document.createElement('div');holder.append(clean);
  return `<!doctype html><html><head><meta charset="utf-8"><meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'none'; style-src 'unsafe-inline'; img-src data:; connect-src 'none'; frame-src 'none'; object-src 'none'; base-uri 'none'; form-action 'none'"><meta name="referrer" content="no-referrer"><style>:root{color-scheme:light dark}body{font:16px/1.65 'Segoe UI',sans-serif;overflow-wrap:anywhere;margin:16px}table{border-collapse:collapse;max-width:100%}td,th{padding:5px;overflow-wrap:anywhere}pre{white-space:pre-wrap}blockquote{border-inline-start:3px solid #89977d;margin:16px 0;padding-inline-start:16px}img{max-width:100%;height:auto;max-height:640px;object-fit:contain}a{color:inherit;text-decoration:underline}.mail-image-placeholder{display:block;margin:8px 0;padding:8px 12px;border:1px solid #89977d66;border-radius:4px;font-size:13px}h1,h2,h3{line-height:1.35}hr{border:0;border-top:1px solid #89977d}</style></head><body>${holder.innerHTML}</body></html>`;
 }

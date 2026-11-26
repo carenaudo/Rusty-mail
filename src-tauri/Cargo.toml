@@ -25,7 +25,8 @@ base64 = "0.22"
 subtle = "2"
 open = "5"
 tokio = { version = "1", features = ["rt-multi-thread", "time", "sync", "net", "io-util", "macros"] }
-async-imap = { version = "0.12", default-features = false, features = ["runtime-tokio"] }
+# Use the upstream pin-project fix until a crates.io release includes it.
+async-imap = { version = "0.12", git = "https://github.com/chatmail/async-imap", rev = "d1f2606421c9211f992c1c565a32d8f770476aeb", default-features = false, features = ["runtime-tokio"] }
 tokio-native-tls = "0.3"
 native-tls = "0.2"
 futures-util = "0.3"

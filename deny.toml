@@ -4,8 +4,7 @@ all-features = true
 
 [advisories]
 ignore = [
- { id = "RUSTSEC-2026-0441", reason = "Unmaintained only. async-imap 0.12.0 uses pin-utils for local pinning. Upstream removed it after 0.12.0; remove this exception when that change ships." },
- { id = "RUSTSEC-2026-0543", reason = "Unmaintained only. Chrono remains a required transitive dependency of the published async-imap; remove this exception when async-imap no longer requires it." },
+ { id = "RUSTSEC-2026-0543", reason = "Unmaintained only. The pinned upstream async-imap still requires chrono with default features disabled. Remove this exception when async-imap drops chrono." },
 ]
 
 [licenses]
@@ -29,4 +28,5 @@ wildcards = "deny"
 unknown-registry = "deny"
 unknown-git = "deny"
 allow-registry = ["https://github.com/rust-lang/crates.io-index"]
-allow-git = []
+allow-git = ["https://github.com/chatmail/async-imap"]
+required-git-spec = "rev"

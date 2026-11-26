@@ -13,8 +13,16 @@ function walk(id){if(included.has(id))return;included.add(id);for(const dep of n
 walk(metadata.resolve.root);
 const records=[];
 function licenses(directory){const result=[];if(!existsSync(directory))return result;for(const item of readdirSync(directory,{withFileTypes:true})){if(item.isFile()&&/^(licen[cs]e|copying|notice|unlicense|copyright)([._-]|$)/i.test(item.name)&&statSync(join(directory,item.name)).size<2*1024*1024){result.push({name:item.name,text:readFileSync(join(directory,item.name),'utf8')})}if(item.isDirectory()&&/^licenses?$/i.test(item.name)){for(const file of readdirSync(join(directory,item.name),{withFileTypes:true})){const path=join(directory,item.name,file.name);if(file.isFile()&&statSync(path).size<2*1024*1024)result.push({name:`${item.name}/${file.name}`,text:readFileSync(path,'utf8')})}}}return result;}
-for(const id of [...included].sort()){const pkg=packages.get(id);if(!pkg||pkg.id===metadata.resolve.root)continue;const directory=dirname(pkg.manifest_path);const texts=licenses(directory);if(pkg.license_file&&existsSync(join(directory,pkg.license_file))&&!texts.some(t=>t.name===pkg.license_file)){texts.push({name:pkg.license_file,text:readFileSync(join(directory,pkg.license_file),'utf8')})}
- records.push({ecosystem:'Rust',name:pkg.name,version:pkg.version,license:pkg.license??'See license files',source:`https://crates.io/api/v1/crates/${pkg.name}/${pkg.version}/download`,texts});
+const rustPackages=[...included].filter(id=>id!==metadata.resolve.root).map(id=>packages.get(id));
+const packageKey=pkg=>`${pkg.name}@${pkg.version}`;
+rustPackages.sort((a,b)=>packageKey(a)<packageKey(b)?-1:packageKey(a)>packageKey(b)?1:0);
+for(const pkg of rustPackages){const directory=dirname(pkg.manifest_path);const texts=licenses(directory);if(pkg.license_file&&existsSync(join(directory,pkg.license_file))&&!texts.some(t=>t.name===pkg.license_file)){texts.push({name:pkg.license_file,text:readFileSync(join(directory,pkg.license_file),'utf8')})}
+ let source=`https://crates.io/api/v1/crates/${pkg.name}/${pkg.version}/download`;
+ if(pkg.source?.startsWith('git+')){
+  const upstream=new URL(pkg.source.slice(4));
+  source=`${upstream.origin}${upstream.pathname.replace(/\.git$/,'')}/archive/${upstream.hash.slice(1)}.tar.gz`;
+ }
+ records.push({ecosystem:'Rust',name:pkg.name,version:pkg.version,license:pkg.license??'See license files',source,texts});
  if(pkg.name==='sqlcipher-src'){
   const bundled=licenses(join(directory,'sqlcipher'));
   if(!bundled.some(t=>t.name==='LICENSE-sqlcipher')||!bundled.some(t=>t.name==='LICENSE-libtomcrypt'))throw Error('Missing SQLCipher source archive notices');

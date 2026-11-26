@@ -92,7 +92,7 @@
     "name": "async-imap",
     "version": "0.12.0",
     "license": "MIT OR Apache-2.0",
-    "source": "https://crates.io/api/v1/crates/async-imap/0.12.0/download",
+    "source": "https://github.com/chatmail/async-imap/archive/d1f2606421c9211f992c1c565a32d8f770476aeb.tar.gz",
     "licenseFiles": [
       "LICENSE-APACHE",
       "LICENSE-MIT"
@@ -1883,17 +1883,6 @@
     "version": "1.1.13",
     "license": "Apache-2.0 OR MIT",
     "source": "https://crates.io/api/v1/crates/pin-project/1.1.13/download",
-    "licenseFiles": [
-      "LICENSE-APACHE",
-      "LICENSE-MIT"
-    ]
-  },
-  {
-    "ecosystem": "Rust",
-    "name": "pin-utils",
-    "version": "0.1.1",
-    "license": "MIT OR Apache-2.0",
-    "source": "https://crates.io/api/v1/crates/pin-utils/0.1.1/download",
     "licenseFiles": [
       "LICENSE-APACHE",
       "LICENSE-MIT"

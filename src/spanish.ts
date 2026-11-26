@@ -168,6 +168,7 @@ export const spanish: Readonly<Record<string, string>> = {
   "Links in this message ({count})": "Enlaces en este mensaje ({count})",
   "LIVE MAIL": "CORREO",
   "Load remote images": "Cargar imágenes remotas",
+  "Enable links in message": "Habilitar enlaces en el mensaje",
   "Load remote images?": "¿Cargar imágenes remotas?",
   "Loading embedded images…": "Cargando imágenes incrustadas…",
   "Loading operations…": "Cargando operaciones…",

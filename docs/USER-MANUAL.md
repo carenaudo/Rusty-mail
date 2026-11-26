@@ -38,8 +38,9 @@ If a send is marked **uncertain**, check the provider’s Sent folder before try
 ![Light-mode confirmation warning that loading remote images contacts external servers](screenshots/image-confirmation.png)
 
 - Select **View plain text** to switch away from the formatted message. **Show formatting** switches back.
-- Images start blocked. If you need them, choose **Load remote images** or **Show embedded images** and review the confirmation. A remote image request may tell the sender you opened the message.
-- Select an attachment to review its name before saving. Expand **Links in this message** to review a destination before opening it in your browser.
+- Images start blocked. Choose **Load remote images** or **Show embedded images** and confirm to display supported images in the message. A remote image request may tell the sender you opened the message.
+- Select **Enable links in message** to make links clickable in the formatted body. Clicking a link shows its destination before opening it. You can also review destinations under **Links in this message**.
+- Select an attachment to review its name before saving.
 - The reader’s **AI tools** require a configured model. A hosted model requires consent before it can receive the selected message. [AI and data sharing](SECURITY.md)
 
 ## Appearance and shortcuts
